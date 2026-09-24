@@ -77,4 +77,5 @@ pub mod error;
 pub mod lcw;
 pub mod movie;
 pub mod parser;
+mod rgb;
 pub mod video;

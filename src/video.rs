@@ -10,6 +10,7 @@
 use crate::error::Error;
 use crate::lcw;
 use crate::parser::{RawChunk, VQAHeader, VQAVersion, raw_chunk};
+use crate::rgb;
 
 /// Sanity limit on the pixels in one frame and on codebook bytes, so a
 /// malformed header cannot demand gigabyte allocations.
@@ -48,19 +49,36 @@ impl Frame {
     /// Convert the frame to packed RGB888 bytes, row-major. Indexed pixels
     /// with no palette entry come out black.
     pub fn to_rgb888(&self) -> Vec<u8> {
+        let mut out = vec![0; self.pixel_count() * 3];
+        self.write_rgb888(&mut out);
+        out
+    }
+
+    /// Like [`Frame::to_rgb888`], but writes into `out`, so one buffer can
+    /// be reused across frames.
+    ///
+    /// # Panics
+    ///
+    /// If `out` isn't exactly three bytes per pixel long.
+    pub fn write_rgb888(&self, out: &mut [u8]) {
+        assert_eq!(
+            out.len(),
+            self.pixel_count() * 3,
+            "RGB888 output must hold three bytes per pixel"
+        );
         match &self.pixels {
-            FramePixels::Indexed { pixels, palette } => pixels
-                .iter()
-                .flat_map(|&i| palette.get(usize::from(i)).copied().unwrap_or([0, 0, 0]))
-                .collect(),
-            FramePixels::HiColor { pixels } => pixels
-                .iter()
-                .flat_map(|&p| {
-                    // scale each 5-bit channel to 8 bits
-                    let scale = |v: u16| (v << 3 | v >> 2) as u8;
-                    [scale(p >> 10 & 31), scale(p >> 5 & 31), scale(p & 31)]
-                })
-                .collect(),
+            FramePixels::Indexed { pixels, palette } => {
+                rgb::indexed_to_rgb888(pixels, palette, out);
+            }
+            FramePixels::HiColor { pixels } => rgb::hicolor_to_rgb888(pixels, out),
+        }
+    }
+
+    /// The number of pixels in `pixels`.
+    fn pixel_count(&self) -> usize {
+        match &self.pixels {
+            FramePixels::Indexed { pixels, .. } => pixels.len(),
+            FramePixels::HiColor { pixels } => pixels.len(),
         }
     }
 }

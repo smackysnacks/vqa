@@ -21,13 +21,14 @@ fuzz_target!(|data: &[u8]| {
     let _ = sn2j_chunk(data);
 
     // The high-level API must also hold up: parse, decode a bounded number
-    // of video frames, and decode the soundtrack.
+    // of video frames and convert them to RGB, and decode the soundtrack.
     if let Ok(vqa) = VQA::parse(data) {
         if let Ok(frames) = vqa.frames() {
             for frame in frames.take(16) {
-                if frame.is_err() {
+                let Ok(frame) = frame else {
                     break;
-                }
+                };
+                let _ = frame.to_rgb888();
             }
         }
         let _ = vqa.decode_audio();

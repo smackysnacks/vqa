@@ -126,6 +126,18 @@ fn time(path: &str) {
             "  to_rgb888      {:8.1} us/frame",
             rgb.as_secs_f64() * 1e6 / 100.0
         );
+
+        let mut out = vec![0; frame.width * frame.height * 3];
+        let rgb = best(|| {
+            for _ in 0..100 {
+                frame.write_rgb888(&mut out);
+                black_box(&out);
+            }
+        });
+        println!(
+            "  write_rgb888   {:8.1} us/frame  (reused buffer)",
+            rgb.as_secs_f64() * 1e6 / 100.0
+        );
     }
 
     // every compressed sub-chunk of the video stream
@@ -243,6 +255,24 @@ fn synth8() {
         println!(
             "synthetic 8-bit v2 {width}x{height}, 4x2 blocks: {:.4} ms/frame",
             ms(decode) / frames as f64
+        );
+
+        // palette lookup, cache-hot as in `time`
+        let mut decoder = FrameDecoder::new(&header).expect("bad synthetic header");
+        decoder
+            .process_vqfl(&setup)
+            .expect("bad synthetic codebook");
+        let frame = decoder
+            .decode_frame(&tables[0])
+            .expect("bad synthetic frame");
+        let rgb = best(|| {
+            for _ in 0..100 {
+                black_box(frame.to_rgb888());
+            }
+        });
+        println!(
+            "  to_rgb888 {:8.1} us/frame",
+            rgb.as_secs_f64() * 1e6 / 100.0
         );
     }
 }
