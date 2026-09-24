@@ -112,8 +112,10 @@ impl<'a> VQA<'a> {
                         samples.extend(
                             chunk
                                 .data
-                                .chunks_exact(2)
-                                .map(|b| i16::from_le_bytes([b[0], b[1]])),
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|&b| i16::from_le_bytes(b)),
                         );
                     } else {
                         samples.extend(chunk.data.iter().map(|&b| (i16::from(b) - 128) << 8));

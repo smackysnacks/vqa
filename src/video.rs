@@ -238,8 +238,10 @@ impl FrameDecoder {
         bytes.truncate(bytes.len() - bytes.len() % entry_bytes);
         if self.hicolor {
             self.codebook16 = bytes
-                .chunks_exact(2)
-                .map(|p| u16::from_le_bytes([p[0], p[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&p| u16::from_le_bytes(p))
                 .collect();
         } else {
             self.codebook8 = bytes;
@@ -284,11 +286,13 @@ impl FrameDecoder {
             return Err(Error::Video("palette size"));
         }
         self.palette = data
-            .chunks_exact(3)
-            .map(|rgb| {
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|&[r, g, b]| {
                 // scale VGA 6-bit values to full 8-bit range
                 let scale = |v: u8| (v & 0x3f) << 2 | (v & 0x3f) >> 4;
-                [scale(rgb[0]), scale(rgb[1]), scale(rgb[2])]
+                [scale(r), scale(g), scale(b)]
             })
             .collect();
         Ok(())
