@@ -7,8 +7,71 @@ fuzz_target!(|data: &[u8]| {
     let (first, second) = data.split_at(data.len() / 2);
 
     // Decode two chunks back-to-back with one state, as playback does across
-    // successive SND2 chunks.
+    // successive SND2 chunks, and agree exactly with the original decoder.
     let mut state = CodecState::new();
-    let _ = decompress(&mut state, first);
-    let _ = decompress(&mut state, second);
+    let mut oracle = ReferenceState::default();
+    for chunk in [first, second] {
+        assert_eq!(decompress(&mut state, chunk), reference(&mut oracle, chunk));
+    }
 });
+
+#[derive(Default)]
+struct ReferenceState {
+    sample: i32,
+    index: i32,
+}
+
+const STEP_TABLE: [u32; 89] = [
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
+    73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
+    494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272,
+    2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493,
+    10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+];
+
+const INDEX_ADJUSTMENT: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
+
+/// The original branchy decoder, kept as the oracle for the table-driven
+/// one.
+fn reference(state: &mut ReferenceState, input: &[u8]) -> Vec<i16> {
+    let mut buffer = Vec::with_capacity(input.len() * 2);
+    let mut low_nibble = true;
+    let mut i = 0;
+
+    let mut step = STEP_TABLE[state.index as usize];
+    while i < input.len() {
+        let nibble: u8;
+        if low_nibble {
+            nibble = input[i] & 0xf;
+        } else {
+            nibble = (input[i] >> 4) & 0xf;
+            i += 1;
+        };
+        low_nibble = !low_nibble;
+
+        state.index = (state.index + INDEX_ADJUSTMENT[nibble as usize]).clamp(0, 88);
+        let sign = nibble & 8;
+        let delta = nibble & 7;
+        let mut diff = step >> 3;
+        if delta & 4 == 4 {
+            diff += step;
+        }
+        if delta & 2 == 2 {
+            diff += step >> 1;
+        }
+        if delta & 1 == 1 {
+            diff += step >> 2;
+        }
+        if sign == 8 {
+            state.sample -= diff as i32;
+        } else {
+            state.sample += diff as i32;
+        }
+        state.sample = state.sample.clamp(-32768, 32767);
+        step = STEP_TABLE[state.index as usize];
+
+        buffer.push(state.sample as i16);
+    }
+
+    buffer
+}
