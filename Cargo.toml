@@ -3,6 +3,7 @@ name = "vqa"
 version = "0.5.1"
 authors = ["Mack Stump <mack@mackstump.com>"]
 edition = "2024"
+rust-version = "1.89"
 description = "Parser and decoder for Westwood Studios' VQA (Vector Quantized Animation) full-motion-video format"
 homepage = "https://github.com/smackysnacks/vqa"
 repository = "https://github.com/smackysnacks/vqa"
