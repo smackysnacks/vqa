@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
 
-use vqa::{Frame, FramePixels, VQA};
+use vqa::{FramePixelsRef, FrameRef, Frames, VQA};
 
 /// The audio side of playback: keeps the stream alive and exposes the
 /// position counter the video loop uses as its clock.
@@ -158,6 +158,7 @@ fn main() {
 
     let fps = f64::from(vqa.header.frame_rate.max(1));
     let mut frames = vqa.frames().expect("bad video header");
+    let mut checkpoints = Checkpoints::new(&frames, (CHECKPOINT_SECONDS * fps) as usize);
     let mut buf = vec![0u32; width * height];
     let mut next_frame = 0usize;
     let mut video_done = false;
@@ -189,12 +190,12 @@ fn main() {
             let t = (clock.now() + seek).max(0.0);
             clock.set(t);
             // Frames build on the decoder state left by their predecessors,
-            // so a backward seek means decoding again from the start; the
-            // catch-up loop below does the rest. Seeking past the end just
-            // ends playback.
-            if ((t * fps) as usize) < next_frame {
-                frames = vqa.frames().expect("bad video header");
-                next_frame = 0;
+            // so a backward seek resumes from the last checkpoint before the
+            // target; the catch-up loop below does the rest. Seeking past the
+            // end just ends playback.
+            let target = (t * fps) as usize;
+            if target < next_frame {
+                (frames, next_frame) = checkpoints.restore(target);
                 video_done = false;
             }
         }
@@ -202,14 +203,15 @@ fn main() {
         // Decode every frame that has come due; draw only the newest. If the
         // loop stalled, this also catches video back up to the clock (the
         // intermediate decodes are mandatory anyway - they carry codebook
-        // state).
+        // state). Frames are borrowed from the decoder, never copied out.
         let target = (clock.now() * fps) as usize;
         while !video_done && next_frame <= target {
-            match frames.next() {
+            checkpoints.save(next_frame, &frames);
+            match frames.next_ref() {
                 Some(frame) => {
                     let frame = frame.expect("failed to decode frame");
                     if next_frame == target {
-                        fill_buffer(&frame, &mut buf);
+                        fill_buffer(frame, &mut buf);
                     }
                     next_frame += 1;
                 }
@@ -233,15 +235,15 @@ fn main() {
 }
 
 /// Convert a decoded frame into minifb's 0RGB u32 pixel layout.
-fn fill_buffer(frame: &Frame, out: &mut [u32]) {
-    match &frame.pixels {
-        FramePixels::Indexed { pixels, palette } => {
+fn fill_buffer(frame: FrameRef<'_>, out: &mut [u32]) {
+    match frame.pixels {
+        FramePixelsRef::Indexed { pixels, palette } => {
             for (out, &i) in out.iter_mut().zip(pixels) {
                 let [r, g, b] = palette.get(usize::from(i)).copied().unwrap_or([0, 0, 0]);
                 *out = u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b);
             }
         }
-        FramePixels::HiColor { pixels } => {
+        FramePixelsRef::HiColor { pixels } => {
             for (out, &p) in out.iter_mut().zip(pixels) {
                 // scale each 5-bit channel to 8 bits
                 let scale = |v: u32| v << 3 | v >> 2;
@@ -249,6 +251,45 @@ fn fill_buffer(frame: &Frame, out: &mut [u32]) {
                 *out = scale(p >> 10 & 31) << 16 | scale(p >> 5 & 31) << 8 | scale(p & 31);
             }
         }
+    }
+}
+
+/// Seconds of video between decoder checkpoints.
+const CHECKPOINT_SECONDS: f64 = 5.0;
+
+/// Copies of the frame iterator, saved every few seconds of video as
+/// playback reaches them. Frames build on the decoder state their
+/// predecessors left, so a backward seek resumes from the nearest earlier
+/// copy instead of decoding from the start. Each copy holds one decoder's
+/// state: under a megabyte for a 640x400 HiColor movie.
+struct Checkpoints<'a> {
+    /// Frames between checkpoints.
+    every: usize,
+    /// `saved[i]` decodes frame `i * every` next.
+    saved: Vec<Frames<'a>>,
+}
+
+impl<'a> Checkpoints<'a> {
+    fn new(frames: &Frames<'a>, every: usize) -> Self {
+        Checkpoints {
+            every: every.max(1),
+            saved: vec![frames.clone()],
+        }
+    }
+
+    /// Save `frames`, which decodes `next_frame` next, if that's where the
+    /// next checkpoint falls.
+    fn save(&mut self, next_frame: usize, frames: &Frames<'a>) {
+        if next_frame == self.saved.len() * self.every {
+            self.saved.push(frames.clone());
+        }
+    }
+
+    /// The last checkpoint at or before `frame`, and the frame it decodes
+    /// next.
+    fn restore(&self, frame: usize) -> (Frames<'a>, usize) {
+        let i = (frame / self.every).min(self.saved.len() - 1);
+        (self.saved[i].clone(), i * self.every)
     }
 }
 
