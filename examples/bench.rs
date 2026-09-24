@@ -108,6 +108,19 @@ fn time(path: &str) {
         ms(decode) / num_frames.max(1) as f64
     );
 
+    // the same, borrowing each frame instead of copying it out
+    let decode = best(|| {
+        let mut frames = vqa.frames().expect("bad video header");
+        while let Some(frame) = frames.next_ref() {
+            black_box(frame.expect("failed to decode frame"));
+        }
+    });
+    println!(
+        "  ... next_ref   {:8.1} ms  ({:.3} ms/frame)",
+        ms(decode),
+        ms(decode) / num_frames.max(1) as f64
+    );
+
     // one frame from the middle of the movie, converted repeatedly while it
     // sits in cache - as it does right after decoding
     if let Some(frame) = vqa

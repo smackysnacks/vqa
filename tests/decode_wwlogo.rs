@@ -2,7 +2,7 @@
 //! all 130 video frames and the full soundtrack - and verify the output
 //! against known checksums, locking in decoder behavior across refactors.
 
-use vqa::{FramePixels, VQA};
+use vqa::{FramePixels, FramePixelsRef, FrameRef, VQA};
 
 const FNV_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 
@@ -61,4 +61,49 @@ fn decodes_wwlogo_audio_to_known_checksum() {
         .iter()
         .fold(FNV_BASIS, |hash, s| fnv1a(hash, &s.to_le_bytes()));
     assert_eq!(hash, 0x8f66_69e6_e5b3_4e72);
+}
+
+/// FNV-1a over one HiColor frame's pixels.
+fn frame_hash(frame: FrameRef<'_>) -> u64 {
+    match frame.pixels {
+        FramePixelsRef::HiColor { pixels } => pixels
+            .iter()
+            .fold(FNV_BASIS, |hash, pixel| fnv1a(hash, &pixel.to_le_bytes())),
+        _ => panic!("wwlogo is a HiColor movie"),
+    }
+}
+
+#[test]
+fn borrowed_skipped_and_cloned_frames_match_owned_ones() {
+    let buffer = wwlogo();
+    let vqa = VQA::parse(&buffer).expect("failed to parse VQA");
+    let frames = || vqa.frames().expect("frame decoder rejected the header");
+    let owned: Vec<u64> = frames()
+        .map(|frame| frame_hash(frame.expect("failed to decode frame").view()))
+        .collect();
+    assert_eq!(owned.len(), 130);
+
+    // next_ref borrows the same frames the iterator copies out
+    let mut borrowed = Vec::new();
+    let mut iter = frames();
+    while let Some(frame) = iter.next_ref() {
+        borrowed.push(frame_hash(frame.expect("failed to decode frame")));
+    }
+    assert_eq!(borrowed, owned);
+
+    // nth skips frames without copying them but lands on the same ones
+    let mut iter = frames();
+    let nth = |iter: &mut vqa::Frames<'_>, n| frame_hash(iter.nth(n).unwrap().unwrap().view());
+    assert_eq!(nth(&mut iter, 40), owned[40]);
+    assert_eq!(nth(&mut iter, 9), owned[50]);
+
+    // a clone carries on from the same position, independently
+    let mut resumed = iter.clone();
+    for expected in &owned[51..] {
+        assert_eq!(nth(&mut iter, 0), *expected);
+    }
+    assert!(iter.next().is_none());
+    assert_eq!(nth(&mut resumed, 0), owned[51]);
+
+    assert!(frames().nth(130).is_none());
 }

@@ -11,7 +11,7 @@ use crate::error::Error;
 use crate::parser::{
     FrameInfo, RawChunk, VQAHeader, VQAVersion, form_chunk, frame_info, raw_chunk, vqa_header,
 };
-use crate::video::{Frame, FrameDecoder};
+use crate::video::{Frame, FrameDecoder, FrameRef};
 
 /// A parsed VQA movie, borrowing the file's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,16 +185,36 @@ impl<'a> Iterator for Chunks<'a> {
 /// Iterator over a movie's decoded video frames. Every VQFR chunk yields one
 /// frame; VQFL codebook refreshes are applied transparently. Stops after the
 /// first error.
+///
+/// Each item is a copy of the decoder's frame. [`Frames::next_ref`] borrows
+/// it instead, and [`Iterator::nth`] skips frames without copying them.
+/// Cloning saves the decoding position: frames build on the state their
+/// predecessors left, so a clone is the way back to an earlier frame
+/// without starting over.
+#[derive(Clone)]
 pub struct Frames<'a> {
     chunks: Chunks<'a>,
     decoder: FrameDecoder,
     done: bool,
 }
 
-impl Iterator for Frames<'_> {
-    type Item = Result<Frame, Error>;
+impl<'a> Frames<'a> {
+    /// Decode the next frame and borrow it from the decoder: [`Iterator::next`]
+    /// without the copy. The frame is valid until the next call.
+    pub fn next_ref(&mut self) -> Option<Result<FrameRef<'_>, Error>> {
+        match self.next_vqfr()? {
+            Ok(data) => {
+                let result = self.decoder.decode_frame_ref(data);
+                self.done = result.is_err();
+                Some(result)
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Walk the chunks up to the next VQFR, applying VQFL refreshes on the
+    /// way, and return its payload.
+    fn next_vqfr(&mut self) -> Option<Result<&'a [u8], Error>> {
         if self.done {
             return None;
         }
@@ -207,11 +227,7 @@ impl Iterator for Frames<'_> {
                             return Some(Err(e));
                         }
                     }
-                    b"VQFR" => {
-                        let result = self.decoder.decode_frame(chunk.data);
-                        self.done = result.is_err();
-                        return Some(result);
-                    }
+                    b"VQFR" => return Some(Ok(chunk.data)),
                     _ => {}
                 },
                 Err(e) => {
@@ -220,6 +236,25 @@ impl Iterator for Frames<'_> {
                 }
             }
         }
+    }
+}
+
+impl Iterator for Frames<'_> {
+    type Item = Result<Frame, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.next_ref()?.map(|frame| frame.to_frame()))
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        // skipped frames are decoded but never copied out; as with the
+        // default nth, an error among them ends the iteration
+        for _ in 0..n {
+            if self.next_ref()?.is_err() {
+                return None;
+            }
+        }
+        self.next()
     }
 }
 

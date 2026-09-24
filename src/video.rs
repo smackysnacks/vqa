@@ -45,7 +45,87 @@ pub enum FramePixels {
     },
 }
 
+/// A decoded frame borrowed from the [`FrameDecoder`] that produced it:
+/// a [`Frame`] without the copy, valid until the decoder moves on to the
+/// next frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameRef<'a> {
+    /// Width in pixels.
+    pub width: usize,
+    /// Height in pixels.
+    pub height: usize,
+    /// The pixel data, row-major.
+    pub pixels: FramePixelsRef<'a>,
+}
+
+/// A borrowed frame's pixel data, row-major; see [`FramePixels`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FramePixelsRef<'a> {
+    /// 8-bit palette indices plus the palette in effect, already scaled from
+    /// VGA 6-bit to full 8-bit range.
+    Indexed {
+        /// One palette index per pixel.
+        pixels: &'a [u8],
+        /// The RGB palette the indices point into.
+        palette: &'a [[u8; 3]],
+    },
+    /// 15-bit `0rrrrrgg gggbbbbb` pixels (5 bits per channel).
+    HiColor {
+        /// One packed 15-bit value per pixel.
+        pixels: &'a [u16],
+    },
+}
+
 impl Frame {
+    /// Borrow the frame as a [`FrameRef`].
+    pub fn view(&self) -> FrameRef<'_> {
+        FrameRef {
+            width: self.width,
+            height: self.height,
+            pixels: match &self.pixels {
+                FramePixels::Indexed { pixels, palette } => {
+                    FramePixelsRef::Indexed { pixels, palette }
+                }
+                FramePixels::HiColor { pixels } => FramePixelsRef::HiColor { pixels },
+            },
+        }
+    }
+
+    /// Convert the frame to packed RGB888 bytes, row-major. Indexed pixels
+    /// with no palette entry come out black.
+    pub fn to_rgb888(&self) -> Vec<u8> {
+        self.view().to_rgb888()
+    }
+
+    /// Like [`Frame::to_rgb888`], but writes into `out`, so one buffer can
+    /// be reused across frames.
+    ///
+    /// # Panics
+    ///
+    /// If `out` isn't exactly three bytes per pixel long.
+    pub fn write_rgb888(&self, out: &mut [u8]) {
+        self.view().write_rgb888(out);
+    }
+}
+
+impl FrameRef<'_> {
+    /// Copy the pixels out into an owned [`Frame`].
+    pub fn to_frame(&self) -> Frame {
+        Frame {
+            width: self.width,
+            height: self.height,
+            pixels: match self.pixels {
+                FramePixelsRef::Indexed { pixels, palette } => FramePixels::Indexed {
+                    pixels: pixels.to_vec(),
+                    palette: palette.to_vec(),
+                },
+                FramePixelsRef::HiColor { pixels } => FramePixels::HiColor {
+                    pixels: pixels.to_vec(),
+                },
+            },
+        }
+    }
+
     /// Convert the frame to packed RGB888 bytes, row-major. Indexed pixels
     /// with no palette entry come out black.
     pub fn to_rgb888(&self) -> Vec<u8> {
@@ -54,8 +134,8 @@ impl Frame {
         out
     }
 
-    /// Like [`Frame::to_rgb888`], but writes into `out`, so one buffer can
-    /// be reused across frames.
+    /// Like [`FrameRef::to_rgb888`], but writes into `out`, so one buffer
+    /// can be reused across frames.
     ///
     /// # Panics
     ///
@@ -66,19 +146,19 @@ impl Frame {
             self.pixel_count() * 3,
             "RGB888 output must hold three bytes per pixel"
         );
-        match &self.pixels {
-            FramePixels::Indexed { pixels, palette } => {
+        match self.pixels {
+            FramePixelsRef::Indexed { pixels, palette } => {
                 rgb::indexed_to_rgb888(pixels, palette, out);
             }
-            FramePixels::HiColor { pixels } => rgb::hicolor_to_rgb888(pixels, out),
+            FramePixelsRef::HiColor { pixels } => rgb::hicolor_to_rgb888(pixels, out),
         }
     }
 
     /// The number of pixels in `pixels`.
     fn pixel_count(&self) -> usize {
-        match &self.pixels {
-            FramePixels::Indexed { pixels, .. } => pixels.len(),
-            FramePixels::HiColor { pixels } => pixels.len(),
+        match self.pixels {
+            FramePixelsRef::Indexed { pixels, .. } => pixels.len(),
+            FramePixelsRef::HiColor { pixels } => pixels.len(),
         }
     }
 }
@@ -89,7 +169,9 @@ impl Frame {
 /// ([`FrameDecoder::decode_frame`]) in file order; it maintains the codebook
 /// (including accumulation of partial codebooks across `cbparts` frames),
 /// the palette, and the previous frame that HiColor movies update
-/// differentially.
+/// differentially. Cloning it saves that state, e.g. to resume decoding
+/// from a checkpoint after seeking.
+#[derive(Clone)]
 pub struct FrameDecoder {
     version: VQAVersion,
     hicolor: bool,
@@ -190,7 +272,13 @@ impl FrameDecoder {
     }
 
     /// Decode one VQFR chunk's payload into the next frame.
-    pub fn decode_frame(&mut self, mut data: &[u8]) -> Result<Frame, Error> {
+    pub fn decode_frame(&mut self, data: &[u8]) -> Result<Frame, Error> {
+        Ok(self.decode_frame_ref(data)?.to_frame())
+    }
+
+    /// Like [`FrameDecoder::decode_frame`], but borrows the frame from the
+    /// decoder instead of copying it out.
+    pub fn decode_frame_ref(&mut self, mut data: &[u8]) -> Result<FrameRef<'_>, Error> {
         while !data.is_empty() {
             let (rest, chunk) = raw_chunk(data).map_err(|_| Error::Parse)?;
             data = rest;
@@ -215,7 +303,7 @@ impl FrameDecoder {
         // the frame is drawn
         self.finish_codebook_parts()?;
 
-        Ok(self.snapshot())
+        Ok(self.frame())
     }
 
     /// Handle the non-pointer sub-chunks: codebooks, codebook parts, and
@@ -528,18 +616,19 @@ impl FrameDecoder {
         }
     }
 
-    fn snapshot(&self) -> Frame {
-        Frame {
+    /// The current frame, as the last VQFR chunk left it.
+    fn frame(&self) -> FrameRef<'_> {
+        FrameRef {
             width: self.width,
             height: self.height,
             pixels: if self.hicolor {
-                FramePixels::HiColor {
-                    pixels: self.frame16.clone(),
+                FramePixelsRef::HiColor {
+                    pixels: &self.frame16,
                 }
             } else {
-                FramePixels::Indexed {
-                    pixels: self.frame8.clone(),
-                    palette: self.palette.clone(),
+                FramePixelsRef::Indexed {
+                    pixels: &self.frame8,
+                    palette: &self.palette,
                 }
             },
         }

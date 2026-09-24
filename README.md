@@ -60,7 +60,7 @@ See the [API docs](https://docs.rs/vqa) for the full tour.
 
 ## Examples
 
-Three runnable examples exercise the high-level API, using the bundled
+Runnable examples exercise the high-level API, using the bundled
 `examples/wwlogo.vqa` sample movie:
 
 ```sh
@@ -73,6 +73,9 @@ cargo run --release --example play -- examples/wwlogo.vqa
 
 # Dump every video frame as PPM
 cargo run --release --example dump_frames -- examples/wwlogo.vqa out/
+
+# Time each decoding stage (or `hash` the decoded output)
+cargo run --release --example bench -- time examples/wwlogo.vqa
 ```
 
 The examples' audio/video output uses [cpal](https://crates.io/crates/cpal)

@@ -22,13 +22,34 @@ fuzz_target!(|data: &[u8]| {
 
     // The high-level API must also hold up: parse, decode a bounded number
     // of video frames and convert them to RGB, and decode the soundtrack.
+    // Borrowed frames (next_ref), skipped ones (nth), and a cloned iterator
+    // must all agree with the owned frames.
     if let Ok(vqa) = VQA::parse(data) {
-        if let Ok(frames) = vqa.frames() {
-            for frame in frames.take(16) {
-                let Ok(frame) = frame else {
+        if let (Ok(owned), Ok(mut borrowed)) = (vqa.frames(), vqa.frames()) {
+            let mut frames = Vec::new();
+            for frame in owned.take(16) {
+                let view = borrowed.next_ref().expect("borrowed frames ended early");
+                assert_eq!(frame.as_ref().map(Frame::view), view.as_ref().copied());
+                if let Ok(frame) = &frame {
+                    let _ = frame.to_rgb888();
+                }
+                let failed = frame.is_err();
+                frames.push(frame);
+                if failed {
                     break;
-                };
-                let _ = frame.to_rgb888();
+                }
+            }
+            // `frames` holds the first 16 frames, or all of them if the
+            // movie ended or failed sooner, so it knows every nth below 16
+            for n in [0, 3, 15] {
+                let mut skipping = vqa.frames().expect("frames() succeeded above");
+                assert_eq!(skipping.nth(n).as_ref(), frames.get(n));
+            }
+            if frames.len() > 2 {
+                let mut original = vqa.frames().expect("frames() succeeded above");
+                original.nth(1);
+                let mut clone = original.clone();
+                assert_eq!(original.next(), clone.next());
             }
         }
         let _ = vqa.decode_audio();
