@@ -48,14 +48,16 @@ copied.
 - The minimum supported Rust version is now 1.89, and is declared in
   `rust-version`. It was 1.87 before, but not declared.
 - The `player` example seeks backwards from checkpoints saved every 5 seconds
-  instead of re-decoding from the first frame. `dump_frames` borrows frames
-  and reuses one RGB buffer.
+  instead of re-decoding from the first frame, and prints the full header.
+  `dump_frames` borrows frames and reuses one RGB buffer.
 
 ### Removed
 
 - **Breaking:** `VQAFlags`. Use `VQAHeader::has_sound`, or test
   `VQAHeader::flags` directly.
 - The `bitflags` dependency.
+- The `play` example, which played only the soundtrack. `player` plays it
+  too.
 
 ## [0.5.1] - 2026-07-24
 

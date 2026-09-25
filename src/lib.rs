@@ -51,9 +51,9 @@
 //! ```
 //!
 //! Runnable examples exercise the same API: `player` plays a movie (video
-//! in a window, soundtrack on the default audio device), `play` plays just
-//! the soundtrack, `dump_frames` writes every video frame out as PPM, and
-//! `bench` times the decoder and hashes its output.
+//! in a window, soundtrack on the default audio device), `dump_frames`
+//! writes every video frame out as PPM, and `bench` times the decoder and
+//! hashes its output.
 //!
 //! # Layers
 //!

@@ -68,9 +68,6 @@ Runnable examples exercise the high-level API, using the bundled
 cargo run --release --example player -- examples/wwlogo.vqa 2
 # or: just play examples/wwlogo.vqa
 
-# Play just the soundtrack
-cargo run --release --example play -- examples/wwlogo.vqa
-
 # Dump every video frame as PPM
 cargo run --release --example dump_frames -- examples/wwlogo.vqa out/
 

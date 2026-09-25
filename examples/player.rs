@@ -115,14 +115,7 @@ fn main() {
 
     let buffer = std::fs::read(&args[1]).expect("failed to read file");
     let vqa = VQA::parse(&buffer).expect("failed to parse VQA");
-    println!(
-        "{}x{} @ {} fps, {} frames, version {:?}",
-        vqa.header.width,
-        vqa.header.height,
-        vqa.header.frame_rate,
-        vqa.header.num_frames,
-        vqa.header.version
-    );
+    println!("{:#?}", vqa.header);
 
     let width = usize::from(vqa.header.width);
     let height = usize::from(vqa.header.height);
