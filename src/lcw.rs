@@ -56,7 +56,7 @@ pub fn decompress(src: &[u8], max_out: usize) -> Result<Vec<u8>, LcwError> {
 
 /// Decompress an LCW stream with an explicit offset [`Mode`].
 pub fn decompress_with(src: &[u8], mode: Mode, max_out: usize) -> Result<Vec<u8>, LcwError> {
-    let mut out = Vec::new();
+    let mut out = Output::new(src.len(), max_out);
     let mut sp = 0;
 
     // streams normally end with a 0x80 command; tolerate running off the end
@@ -73,25 +73,18 @@ pub fn decompress_with(src: &[u8], mode: Mode, max_out: usize) -> Result<Vec<u8>
             let offset = usize::from(cmd & 0x0f) << 8
                 | usize::from(*src.get(sp).ok_or(LcwError::Truncated)?);
             sp += 1;
-            copy_back(&mut out, offset, count, max_out)?;
+            out.copy_back(offset, count)?;
         } else if cmd & 0x40 == 0 {
             // 0b10cc_cccc: copy count literal bytes from the source
             let count = usize::from(cmd & 0x3f);
-            let literal = src.get(sp..sp + count).ok_or(LcwError::Truncated)?;
+            out.literal(src, sp, count)?;
             sp += count;
-            if out.len() + count > max_out {
-                return Err(LcwError::TooLarge);
-            }
-            out.extend_from_slice(literal);
         } else if cmd == 0xfe {
             // 0xFE C C V: write byte V count times
             let count = usize::from(read_u16(src, sp)?);
             let color = *src.get(sp + 2).ok_or(LcwError::Truncated)?;
             sp += 3;
-            if out.len() + count > max_out {
-                return Err(LcwError::TooLarge);
-            }
-            out.resize(out.len() + count, color);
+            out.fill(color, count)?;
         } else {
             // 0b11cc_cccc P P: copy count+3 bytes from position P
             // 0xFF C C P P: copy count bytes from position P
@@ -107,15 +100,15 @@ pub fn decompress_with(src: &[u8], mode: Mode, max_out: usize) -> Result<Vec<u8>
             };
             if count > 0 {
                 let offset = match mode {
-                    Mode::Absolute => out.len().checked_sub(pos).ok_or(LcwError::BadOffset)?,
+                    Mode::Absolute => out.len.checked_sub(pos).ok_or(LcwError::BadOffset)?,
                     Mode::Relative => pos,
                 };
-                copy_back(&mut out, offset, count, max_out)?;
+                out.copy_back(offset, count)?;
             }
         }
     }
 
-    Ok(out)
+    Ok(out.finish())
 }
 
 fn read_u16(src: &[u8], sp: usize) -> Result<u16, LcwError> {
@@ -123,25 +116,109 @@ fn read_u16(src: &[u8], sp: usize) -> Result<u16, LcwError> {
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
-/// Append `count` bytes read from `offset` bytes behind the write position,
-/// one at a time - copies may overlap the write position, RLE-style.
-fn copy_back(
-    out: &mut Vec<u8>,
-    offset: usize,
-    count: usize,
+/// Scratch space kept past the end of the output. Most copies and literals
+/// are a handful of bytes, so rather than loop over a variable length they
+/// move a fixed `WIDE` bytes - one unaligned 16-byte load and store - and
+/// let the excess spill into the scratch space, where later writes cover it.
+const WIDE: usize = 16;
+
+/// The output being decompressed: `buf[..len]` is the data so far, the rest
+/// zero-initialized scratch space for wide copies to spill into.
+struct Output {
+    buf: Vec<u8>,
+    len: usize,
     max_out: usize,
-) -> Result<(), LcwError> {
-    if offset == 0 || offset > out.len() {
-        return Err(LcwError::BadOffset);
+}
+
+impl Output {
+    fn new(src_len: usize, max_out: usize) -> Output {
+        // LCW output is typically 1-2x its input; start at 2x and grow
+        let size = src_len.saturating_mul(2).min(max_out);
+        Output {
+            buf: vec![0; size + WIDE],
+            len: 0,
+            max_out,
+        }
     }
-    if out.len() + count > max_out {
-        return Err(LcwError::TooLarge);
+
+    /// Check that `count` more bytes fit under the cap, and make room for
+    /// them plus the scratch space.
+    #[inline(always)]
+    fn reserve(&mut self, count: usize) -> Result<(), LcwError> {
+        if self.len + count > self.max_out {
+            return Err(LcwError::TooLarge);
+        }
+        if self.len + count + WIDE > self.buf.len() {
+            self.grow(self.len + count);
+        }
+        Ok(())
     }
-    for pos in (out.len() - offset..).take(count) {
-        let byte = out[pos];
-        out.push(byte);
+
+    /// Grow to hold `needed` bytes plus the scratch space, at least doubling
+    /// so appends stay amortized O(1).
+    #[cold]
+    fn grow(&mut self, needed: usize) {
+        let size = needed
+            .max(self.buf.len().saturating_mul(2))
+            .min(self.max_out);
+        self.buf.resize(size + WIDE, 0);
     }
-    Ok(())
+
+    /// Append the `count` literal bytes at `src[sp..]`.
+    #[inline(always)]
+    fn literal(&mut self, src: &[u8], sp: usize, count: usize) -> Result<(), LcwError> {
+        if count <= WIDE && sp + WIDE <= src.len() {
+            // short, and clear of the end of the stream: move WIDE bytes
+            self.reserve(count)?;
+            self.buf[self.len..self.len + WIDE].copy_from_slice(&src[sp..sp + WIDE]);
+        } else {
+            let literal = src.get(sp..sp + count).ok_or(LcwError::Truncated)?;
+            self.reserve(count)?;
+            self.buf[self.len..self.len + count].copy_from_slice(literal);
+        }
+        self.len += count;
+        Ok(())
+    }
+
+    /// Append `count` copies of `byte`.
+    #[inline(always)]
+    fn fill(&mut self, byte: u8, count: usize) -> Result<(), LcwError> {
+        self.reserve(count)?;
+        self.buf[self.len..self.len + count].fill(byte);
+        self.len += count;
+        Ok(())
+    }
+
+    /// Append `count` bytes read from `offset` bytes behind the write
+    /// position. Copies may overlap the write position, RLE-style.
+    #[inline(always)]
+    fn copy_back(&mut self, offset: usize, count: usize) -> Result<(), LcwError> {
+        if offset == 0 || offset > self.len {
+            return Err(LcwError::BadOffset);
+        }
+        self.reserve(count)?;
+        let (from, to) = (self.len - offset, self.len);
+        if offset >= WIDE && count <= WIDE {
+            // short, and the source ends before the write position: move
+            // WIDE bytes
+            self.buf.copy_within(from..from + WIDE, to);
+        } else if offset >= count {
+            self.buf.copy_within(from..from + count, to);
+        } else {
+            // the source runs into the bytes being written; copy one at a
+            // time so the repeating pattern propagates
+            for i in 0..count {
+                self.buf[to + i] = self.buf[from + i];
+            }
+        }
+        self.len += count;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        self.buf.truncate(self.len);
+        self.buf
+    }
 }
 
 #[cfg(test)]
@@ -226,5 +303,62 @@ mod tests {
             decompress(b"\xfe\xff\xff\x41\x80", 64),
             Err(LcwError::TooLarge)
         );
+    }
+
+    #[test]
+    fn far_short_copy_writes_exactly_count_bytes() {
+        // 20 literal bytes, then 5 bytes from 20 behind - far enough for a
+        // wide copy - then a literal that must land right after them
+        let mut src = vec![0x80 | 20];
+        src.extend(b"abcdefghijklmnopqrst");
+        src.extend(b"\x20\x14\x82XY\x80");
+        assert_eq!(
+            decompress(&src, 64).unwrap(),
+            b"abcdefghijklmnopqrstabcdeXY"
+        );
+    }
+
+    #[test]
+    fn short_literals_away_from_the_stream_end_copy_only_their_bytes() {
+        // each literal has 16+ stream bytes after it, so all three take
+        // the wide path
+        let mut src = b"\x83abc\x90".to_vec();
+        src.extend(b"0123456789ABCDEF");
+        src.extend(b"\x81Z\x80");
+        src.extend([0; 16]);
+        assert_eq!(decompress(&src, 64).unwrap(), b"abc0123456789ABCDEFZ");
+    }
+
+    #[test]
+    fn grows_past_the_initial_buffer_and_copies_from_it() {
+        // a 5-byte stream expanding to exactly the cap
+        assert_eq!(
+            decompress(b"\xfe\xe8\x03A\x80", 1000).unwrap(),
+            vec![b'A'; 1000]
+        );
+
+        // literal, 256-byte fill, then 4 bytes from absolute position 0
+        let out = decompress(b"\x82ab\xfe\x00\x01A\xff\x04\x00\x00\x00\x80", 1024).unwrap();
+        let mut expected = b"ab".to_vec();
+        expected.extend([b'A'; 256]);
+        expected.extend(b"abAA");
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn long_overlapping_copy_repeats_the_pattern() {
+        // 40 bytes from 3 behind: longer than a wide move and overlapping
+        // its own output
+        let out = decompress(b"\x83abc\xff\x28\x00\x00\x00\x80", 64).unwrap();
+        let mut expected = b"abc".repeat(15);
+        expected.truncate(43);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn errors_when_a_short_literal_exceeds_cap() {
+        let mut src = b"\x83abc".to_vec();
+        src.extend([0x80; 16]);
+        assert_eq!(decompress(&src, 2), Err(LcwError::TooLarge));
     }
 }

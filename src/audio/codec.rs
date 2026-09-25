@@ -10,6 +10,62 @@ const STEP_TABLE: [u32; 89] = [
 
 const INDEX_ADJUSTMENT: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
 
+/// `DIFF[index][nibble]`: the signed change to the predicted sample when
+/// `nibble` is decoded at step index `index`. Built with the reference
+/// decoder's shift-and-add - `(2 * magnitude + 1) * step / 8` rounds
+/// differently - so a table lookup replaces three data-dependent branches.
+static DIFF: [[i32; 16]; 89] = {
+    let mut table = [[0; 16]; 89];
+    let mut index = 0;
+    while index < 89 {
+        let step = STEP_TABLE[index];
+        let mut nibble = 0;
+        while nibble < 16 {
+            let mut diff = step >> 3;
+            if nibble & 4 != 0 {
+                diff += step;
+            }
+            if nibble & 2 != 0 {
+                diff += step >> 1;
+            }
+            if nibble & 1 != 0 {
+                diff += step >> 2;
+            }
+            table[index][nibble] = if nibble & 8 != 0 {
+                -(diff as i32)
+            } else {
+                diff as i32
+            };
+            nibble += 1;
+        }
+        index += 1;
+    }
+    table
+};
+
+/// `NEXT_INDEX[index][nibble]`: the step index after decoding `nibble` at
+/// step index `index`, already clamped to the step table.
+static NEXT_INDEX: [[u8; 16]; 89] = {
+    let mut table = [[0; 16]; 89];
+    let mut index = 0;
+    while index < 89 {
+        let mut nibble = 0;
+        while nibble < 16 {
+            let next = index as i32 + INDEX_ADJUSTMENT[nibble];
+            table[index][nibble] = if next < 0 {
+                0
+            } else if next > 88 {
+                88
+            } else {
+                next as u8
+            };
+            nibble += 1;
+        }
+        index += 1;
+    }
+    table
+};
+
 /// Predictor state for one audio channel, carried across chunk boundaries.
 ///
 /// Feed every chunk of a channel through [`decompress`] with the same state;
@@ -17,7 +73,8 @@ const INDEX_ADJUSTMENT: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1,
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodecState {
     sample: i32,
-    index: i32,
+    /// always a valid step table index, 0..=88
+    index: usize,
 }
 
 impl CodecState {
@@ -27,6 +84,21 @@ impl CodecState {
             sample: 0,
             index: 0,
         }
+    }
+
+    /// Decode one 4-bit sample, advancing the predictor.
+    #[inline(always)]
+    pub(crate) fn decode(&mut self, nibble: u8) -> i16 {
+        let nibble = usize::from(nibble & 0xf);
+        self.sample = (self.sample + DIFF[self.index][nibble]).clamp(-32768, 32767);
+        self.index = usize::from(NEXT_INDEX[self.index][nibble]);
+        self.sample as i16
+    }
+
+    /// Decode one byte: two samples, low nibble first.
+    #[inline(always)]
+    pub(crate) fn decode_byte(&mut self, byte: u8) -> [i16; 2] {
+        [self.decode(byte), self.decode(byte >> 4)]
     }
 }
 
@@ -43,43 +115,15 @@ impl Default for CodecState {
 /// stream decode with the same state - and each channel needs its own.
 pub fn decompress(state: &mut CodecState, input: &[u8]) -> Vec<i16> {
     let mut buffer = Vec::with_capacity(input.len() * 2);
-    let mut low_nibble = true;
-    let mut i = 0;
-
-    let mut step = STEP_TABLE[state.index as usize];
-    while i < input.len() {
-        let nibble: u8;
-        if low_nibble {
-            nibble = input[i] & 0xf;
-        } else {
-            nibble = (input[i] >> 4) & 0xf;
-            i += 1;
-        };
-        low_nibble = !low_nibble;
-
-        state.index = (state.index + INDEX_ADJUSTMENT[nibble as usize]).clamp(0, 88);
-        let sign = nibble & 8;
-        let delta = nibble & 7;
-        let mut diff = step >> 3;
-        if delta & 4 == 4 {
-            diff += step;
-        }
-        if delta & 2 == 2 {
-            diff += step >> 1;
-        }
-        if delta & 1 == 1 {
-            diff += step >> 2;
-        }
-        if sign == 8 {
-            state.sample -= diff as i32;
-        } else {
-            state.sample += diff as i32;
-        }
-        state.sample = state.sample.clamp(-32768, 32767);
-        step = STEP_TABLE[state.index as usize];
-
-        buffer.push(state.sample as i16);
-    }
-
+    decompress_into(state, input, &mut buffer);
     buffer
+}
+
+/// Like [`decompress`], but appends the samples to `out`, so one buffer can
+/// collect a whole stream.
+pub fn decompress_into(state: &mut CodecState, input: &[u8], out: &mut Vec<i16>) {
+    out.reserve(input.len() * 2);
+    for &byte in input {
+        out.extend_from_slice(&state.decode_byte(byte));
+    }
 }

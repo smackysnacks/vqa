@@ -6,12 +6,12 @@
 use nom::Parser;
 use nom::bytes::complete::tag;
 
-use crate::audio::{CodecState, decompress};
+use crate::audio::{CodecState, decompress_into};
 use crate::error::Error;
 use crate::parser::{
     FrameInfo, RawChunk, VQAHeader, VQAVersion, form_chunk, frame_info, raw_chunk, vqa_header,
 };
-use crate::video::{Frame, FrameDecoder};
+use crate::video::{Frame, FrameDecoder, FrameRef};
 
 /// A parsed VQA movie, borrowing the file's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,22 +88,29 @@ impl<'a> VQA<'a> {
             let chunk = chunk?;
             match &chunk.id {
                 b"SND2" => {
+                    let data = chunk.data;
                     if !stereo {
-                        samples.extend(decompress(&mut left, chunk.data));
+                        decompress_into(&mut left, data, &mut samples);
                     } else if self.header.version == VQAVersion::Three {
                         // v3 splits the chunk in halves: left then right
-                        let half = chunk.data.len() / 2;
-                        let l = decompress(&mut left, &chunk.data[..half]);
-                        let r = decompress(&mut right, &chunk.data[half..]);
-                        interleave(&mut samples, &l, &r);
+                        let (l, r) = data.split_at(data.len() / 2);
+                        decode_stereo(&mut left, &mut right, l.iter().zip(r), &mut samples);
+                        // an odd length leaves the right half a byte longer:
+                        // decode it to keep that predictor in step, but its
+                        // samples have no left partner and are dropped
+                        if let Some(&unpaired) = r.get(l.len()) {
+                            right.decode_byte(unpaired);
+                        }
                     } else {
                         // v1/v2 alternate bytes (two nibble-samples each)
                         // between left and right
-                        let lb: Vec<u8> = chunk.data.iter().step_by(2).copied().collect();
-                        let rb: Vec<u8> = chunk.data.iter().skip(1).step_by(2).copied().collect();
-                        let l = decompress(&mut left, &lb);
-                        let r = decompress(&mut right, &rb);
-                        interleave(&mut samples, &l, &r);
+                        let (pairs, rest) = data.as_chunks::<2>();
+                        let pairs = pairs.iter().map(|[l, r]| (l, r));
+                        decode_stereo(&mut left, &mut right, pairs, &mut samples);
+                        // likewise an odd length ends on an unpaired left byte
+                        if let [unpaired] = rest {
+                            left.decode_byte(*unpaired);
+                        }
                     }
                 }
                 b"SND0" => {
@@ -112,8 +119,10 @@ impl<'a> VQA<'a> {
                         samples.extend(
                             chunk
                                 .data
-                                .chunks_exact(2)
-                                .map(|b| i16::from_le_bytes([b[0], b[1]])),
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|&b| i16::from_le_bytes(b)),
                         );
                     } else {
                         samples.extend(chunk.data.iter().map(|&b| (i16::from(b) - 128) << 8));
@@ -128,10 +137,21 @@ impl<'a> VQA<'a> {
     }
 }
 
-fn interleave(samples: &mut Vec<i16>, left: &[i16], right: &[i16]) {
-    for (&l, &r) in left.iter().zip(right) {
-        samples.push(l);
-        samples.push(r);
+/// Decode stereo byte pairs straight into interleaved samples: each
+/// (left, right) byte pair yields `l0 r0 l1 r1`. The channels' predictors
+/// are independent, so decoding them side by side lets the CPU overlap the
+/// two dependency chains.
+fn decode_stereo<'a>(
+    left: &mut CodecState,
+    right: &mut CodecState,
+    pairs: impl ExactSizeIterator<Item = (&'a u8, &'a u8)>,
+    samples: &mut Vec<i16>,
+) {
+    samples.reserve(pairs.len() * 4);
+    for (&l, &r) in pairs {
+        let [l0, l1] = left.decode_byte(l);
+        let [r0, r1] = right.decode_byte(r);
+        samples.extend_from_slice(&[l0, r0, l1, r1]);
     }
 }
 
@@ -165,16 +185,36 @@ impl<'a> Iterator for Chunks<'a> {
 /// Iterator over a movie's decoded video frames. Every VQFR chunk yields one
 /// frame; VQFL codebook refreshes are applied transparently. Stops after the
 /// first error.
+///
+/// Each item is a copy of the decoder's frame. [`Frames::next_ref`] borrows
+/// it instead, and [`Iterator::nth`] skips frames without copying them.
+/// Cloning saves the decoding position: frames build on the state their
+/// predecessors left, so a clone is the way back to an earlier frame
+/// without starting over.
+#[derive(Clone)]
 pub struct Frames<'a> {
     chunks: Chunks<'a>,
     decoder: FrameDecoder,
     done: bool,
 }
 
-impl Iterator for Frames<'_> {
-    type Item = Result<Frame, Error>;
+impl<'a> Frames<'a> {
+    /// Decode the next frame and borrow it from the decoder: [`Iterator::next`]
+    /// without the copy. The frame is valid until the next call.
+    pub fn next_ref(&mut self) -> Option<Result<FrameRef<'_>, Error>> {
+        match self.next_vqfr()? {
+            Ok(data) => {
+                let result = self.decoder.decode_frame_ref(data);
+                self.done = result.is_err();
+                Some(result)
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Walk the chunks up to the next VQFR, applying VQFL refreshes on the
+    /// way, and return its payload.
+    fn next_vqfr(&mut self) -> Option<Result<&'a [u8], Error>> {
         if self.done {
             return None;
         }
@@ -187,17 +227,132 @@ impl Iterator for Frames<'_> {
                             return Some(Err(e));
                         }
                     }
-                    b"VQFR" => {
-                        let result = self.decoder.decode_frame(chunk.data);
-                        self.done = result.is_err();
-                        return Some(result);
-                    }
+                    b"VQFR" => return Some(Ok(chunk.data)),
                     _ => {}
                 },
                 Err(e) => {
                     self.done = true;
                     return Some(Err(e));
                 }
+            }
+        }
+    }
+}
+
+impl Iterator for Frames<'_> {
+    type Item = Result<Frame, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.next_ref()?.map(|frame| frame.to_frame()))
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        // skipped frames are decoded but never copied out; as with the
+        // default nth, an error among them ends the iteration
+        for _ in 0..n {
+            if self.next_ref()?.is_err() {
+                return None;
+            }
+        }
+        self.next()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::decompress;
+
+    /// A minimal movie: the header plus one SND2 chunk per entry of `sound`.
+    fn movie(version: u16, channels: u8, sound: &[Vec<u8>]) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend(version.to_le_bytes());
+        header.extend(1u16.to_le_bytes()); // flags: has sound
+        header.extend(0u16.to_le_bytes()); // frames
+        header.extend(8u16.to_le_bytes()); // width
+        header.extend(4u16.to_le_bytes()); // height
+        header.extend([4, 2, 15, 0]); // block size, frame rate, cbparts
+        header.extend(256u16.to_le_bytes()); // colors
+        header.extend(0u16.to_le_bytes()); // maxblocks
+        header.extend([0; 6]); // unk1, unk2
+        header.extend(22050u16.to_le_bytes());
+        header.extend([channels, 16]);
+        header.extend([0; 14]); // unk3, unk4, max_cbfz_size, unk5
+        assert_eq!(header.len(), 42);
+
+        let mut body = b"WVQA".to_vec();
+        for (id, data) in
+            std::iter::once((b"VQHD", &header)).chain(sound.iter().map(|d| (b"SND2", d)))
+        {
+            body.extend(id);
+            body.extend((data.len() as u32).to_be_bytes());
+            body.extend(data);
+            if data.len() % 2 == 1 {
+                body.push(0);
+            }
+        }
+        let mut file = b"FORM".to_vec();
+        file.extend((body.len() as u32).to_be_bytes());
+        file.extend(body);
+        file
+    }
+
+    /// The stereo layouts as first written: split each chunk into one byte
+    /// run per channel, decode the runs separately, and zip the samples.
+    fn split_decode_zip(version: u16, channels: u8, sound: &[Vec<u8>]) -> Vec<i16> {
+        let (mut left, mut right) = (CodecState::new(), CodecState::new());
+        let mut samples = Vec::new();
+        for data in sound {
+            if channels < 2 {
+                samples.extend(decompress(&mut left, data));
+                continue;
+            }
+            let (l, r): (Vec<u8>, Vec<u8>) = if version == 3 {
+                let (l, r) = data.split_at(data.len() / 2);
+                (l.to_vec(), r.to_vec())
+            } else {
+                (
+                    data.iter().step_by(2).copied().collect(),
+                    data.iter().skip(1).step_by(2).copied().collect(),
+                )
+            };
+            let l = decompress(&mut left, &l);
+            let r = decompress(&mut right, &r);
+            for (&l, &r) in l.iter().zip(&r) {
+                samples.extend([l, r]);
+            }
+        }
+        samples
+    }
+
+    #[test]
+    fn decode_audio_matches_per_channel_decoding_in_every_layout() {
+        // xorshift64 noise; odd lengths leave an unpaired byte whose
+        // channel state must still advance for the following chunks
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let sound: Vec<Vec<u8>> = [7, 64, 1, 33, 0, 100, 5]
+            .iter()
+            .map(|&len| {
+                (0..len)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        state as u8
+                    })
+                    .collect()
+            })
+            .collect();
+
+        for version in [1, 2, 3] {
+            for channels in [1, 2] {
+                let file = movie(version, channels, &sound);
+                let vqa = VQA::parse(&file).unwrap();
+                assert_eq!(
+                    vqa.decode_audio().unwrap(),
+                    split_decode_zip(version, channels, &sound),
+                    "version {version}, {channels} channel(s)"
+                );
             }
         }
     }

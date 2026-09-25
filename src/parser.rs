@@ -8,7 +8,6 @@
 
 use std::convert::TryInto;
 
-use bitflags::bitflags;
 use nom::{
     IResult, Parser,
     branch::alt,
@@ -141,15 +140,6 @@ pub fn vqa_version(input: &[u8]) -> IResult<&[u8], VQAVersion> {
     .parse(input)
 }
 
-bitflags! {
-    /// Flag bits from the header's `flags` field.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct VQAFlags: u16 {
-        /// The movie carries a soundtrack.
-        const HAS_SOUND = 0b00000001;
-    }
-}
-
 /// The fixed 42-byte `VQHD` header describing the whole movie.
 ///
 /// v1 movies leave several sound fields zeroed; the [`sample_rate`],
@@ -164,8 +154,11 @@ bitflags! {
 pub struct VQAHeader {
     /// VQA version number
     pub version: VQAVersion,
-    /// VQA flags
-    pub flags: VQAFlags,
+    /// Flag bits. Bit 0 marks a soundtrack (see [`has_sound`]); the HiColor
+    /// movies seen so far also set bits 2-4, whose meaning is unknown.
+    ///
+    /// [`has_sound`]: VQAHeader::has_sound
+    pub flags: u16,
     /// Number of frames
     pub num_frames: u16,
     /// Movie width (pixels)
@@ -230,9 +223,9 @@ impl VQAHeader {
         }
     }
 
-    /// Whether the movie carries a soundtrack.
+    /// Whether the movie carries a soundtrack (bit 0 of `flags`).
     pub fn has_sound(&self) -> bool {
-        self.flags.contains(VQAFlags::HAS_SOUND)
+        self.flags & 1 != 0
     }
 
     /// Whether the movie is HiColor (15-bit pixels) rather than 8-bit
@@ -272,7 +265,7 @@ pub fn vqa_header(input: &[u8]) -> IResult<&[u8], VQAHeader> {
         input,
         VQAHeader {
             version,
-            flags: VQAFlags::from_bits_truncate(flags),
+            flags,
             num_frames,
             width,
             height,

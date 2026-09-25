@@ -1,8 +1,9 @@
 [package]
 name = "vqa"
-version = "0.5.1"
+version = "0.6.0"
 authors = ["Mack Stump <mack@mackstump.com>"]
 edition = "2024"
+rust-version = "1.89"
 description = "Parser and decoder for Westwood Studios' VQA (Vector Quantized Animation) full-motion-video format"
 homepage = "https://github.com/smackysnacks/vqa"
 repository = "https://github.com/smackysnacks/vqa"
@@ -15,10 +16,10 @@ categories = [
   "multimedia::video",
   "multimedia::audio",
 ]
-include = ["/src", "/examples/*.rs", "/LICENSE", "/README.md"]
+include = ["/src", "/examples/*.rs", "/CHANGELOG.md", "/LICENSE", "/README.md"]
 
 [dependencies]
-bitflags = "2"
+fearless_simd = "1.0"
 nom = "8"
 
 [dev-dependencies]

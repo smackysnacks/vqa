@@ -30,15 +30,23 @@ fn main() {
         vqa.header.version
     );
 
-    for (i, frame) in vqa.frames().expect("bad video header").enumerate() {
+    // borrow each frame from the decoder and convert it into one reused
+    // buffer; frames in between are still decoded (later frames build on
+    // them) but never converted
+    let mut frames = vqa.frames().expect("bad video header");
+    let mut rgb = Vec::new();
+    let mut i = 0;
+    while let Some(frame) = frames.next_ref() {
         let frame = frame.expect("failed to decode frame");
-        if i % every != 0 {
-            continue;
+        if i % every == 0 {
+            rgb.resize(frame.width * frame.height * 3, 0);
+            frame.write_rgb888(&mut rgb);
+            let path = format!("{}/frame_{:04}.ppm", out_dir, i);
+            let mut file = File::create(&path).expect("failed to create output file");
+            write!(file, "P6\n{} {}\n255\n", frame.width, frame.height).unwrap();
+            file.write_all(&rgb).unwrap();
+            println!("wrote {}", path);
         }
-        let path = format!("{}/frame_{:04}.ppm", out_dir, i);
-        let mut file = File::create(&path).expect("failed to create output file");
-        write!(file, "P6\n{} {}\n255\n", frame.width, frame.height).unwrap();
-        file.write_all(&frame.to_rgb888()).unwrap();
-        println!("wrote {}", path);
+        i += 1;
     }
 }

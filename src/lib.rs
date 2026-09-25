@@ -32,10 +32,28 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! Three runnable examples exercise the same API: `player` plays a movie
-//! (video in a window, soundtrack on the default audio device), `play` plays
-//! just the soundtrack, and `dump_frames` writes every video frame out as
-//! PPM.
+//! Each frame the iterator yields is a copy of the decoder's own. A loop
+//! that is done with each frame before asking for the next can borrow it
+//! instead with [`Frames::next_ref`], and convert it into one reused
+//! buffer:
+//!
+//! ```no_run
+//! # let data = std::fs::read("movie.vqa")?;
+//! # let vqa = vqa::VQA::parse(&data)?;
+//! let mut frames = vqa.frames()?;
+//! let mut rgb = Vec::new();
+//! while let Some(frame) = frames.next_ref() {
+//!     let frame = frame?;
+//!     rgb.resize(frame.width * frame.height * 3, 0);
+//!     frame.write_rgb888(&mut rgb);
+//! }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Runnable examples exercise the same API: `player` plays a movie (video
+//! in a window, soundtrack on the default audio device), `dump_frames`
+//! writes every video frame out as PPM, and `bench` times the decoder and
+//! hashes its output.
 //!
 //! # Layers
 //!
@@ -70,11 +88,12 @@
 pub use error::Error;
 pub use movie::{Chunks, Frames, VQA};
 pub use parser::*;
-pub use video::{Frame, FrameDecoder, FramePixels};
+pub use video::{Frame, FrameDecoder, FramePixels, FramePixelsRef, FrameRef};
 
 pub mod audio;
 pub mod error;
 pub mod lcw;
 pub mod movie;
 pub mod parser;
+mod rgb;
 pub mod video;
