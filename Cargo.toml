@@ -19,7 +19,6 @@ categories = [
 include = ["/src", "/examples/*.rs", "/LICENSE", "/README.md"]
 
 [dependencies]
-bitflags = "2"
 fearless_simd = "1.0"
 nom = "8"
 

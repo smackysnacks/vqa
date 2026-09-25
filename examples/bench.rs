@@ -12,7 +12,7 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use vqa::{FrameDecoder, VQA, VQAFlags, VQAHeader, VQAVersion, lcw, raw_chunk};
+use vqa::{FrameDecoder, VQA, VQAHeader, VQAVersion, lcw, raw_chunk};
 
 const RUNS: usize = 7;
 
@@ -203,7 +203,7 @@ fn synth8() {
         let frames = 1000;
         let header = VQAHeader {
             version: VQAVersion::Two,
-            flags: VQAFlags::empty(),
+            flags: 0,
             num_frames: frames as u16,
             width,
             height,

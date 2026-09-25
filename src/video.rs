@@ -640,13 +640,12 @@ impl FrameDecoder {
 #[allow(clippy::unusual_byte_groupings)]
 mod tests {
     use super::*;
-    use crate::parser::VQAFlags;
 
     /// An 8x4 v2 movie with 4x2 blocks: 2x2 = 4 blocks per frame.
     fn v2_header() -> VQAHeader {
         VQAHeader {
             version: VQAVersion::Two,
-            flags: VQAFlags::empty(),
+            flags: 0,
             num_frames: 3,
             width: 8,
             height: 4,

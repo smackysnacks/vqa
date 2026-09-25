@@ -4,7 +4,7 @@
 use nom::Parser;
 use nom::bytes::complete::{tag, take_until};
 
-use vqa::{VQAFlags, VQAVersion, finf_chunk, form_chunk, vqa_header};
+use vqa::{VQAVersion, finf_chunk, form_chunk, vqa_header};
 
 #[test]
 fn parses_wwlogo_header_and_frame_index() {
@@ -20,7 +20,8 @@ fn parses_wwlogo_header_and_frame_index() {
 
     let (rest, header) = vqa_header(rest).expect("failed to parse VQA header");
     assert!(matches!(header.version, VQAVersion::Three));
-    assert_eq!(header.flags, VQAFlags::HAS_SOUND);
+    assert_eq!(header.flags, 0x001d);
+    assert!(header.has_sound());
     assert_eq!(header.num_frames, 130);
     assert_eq!((header.width, header.height), (640, 400));
     assert_eq!((header.block_width, header.block_height), (4, 2));
