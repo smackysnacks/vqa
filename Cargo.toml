@@ -16,7 +16,7 @@ categories = [
   "multimedia::video",
   "multimedia::audio",
 ]
-include = ["/src", "/examples/*.rs", "/LICENSE", "/README.md"]
+include = ["/src", "/examples/*.rs", "/CHANGELOG.md", "/LICENSE", "/README.md"]
 
 [dependencies]
 fearless_simd = "1.0"
