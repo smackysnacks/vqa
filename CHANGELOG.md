@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On 32-bit targets such as wasm32, a HiColor pointer stream with long runs
+  of skip commands overflowed the block position. Debug builds panicked, and
+  release builds wrapped around silently. The position now saturates, so a
+  write past the frame fails with an error, as on 64-bit targets.
+- The `dump_frames` example no longer panics on a step of `0` or a malformed
+  step.
+- The `FramePixels::HiColor` docs said the top bit of every pixel is clear.
+  Codebooks that use it as an alpha flag (Blade Runner's) carry it into the
+  frame, and RGB888 conversion ignores it.
+
 ## [0.6.0] - 2026-09-24
 
 Frame decoding is 2.5–3.4× faster and audio decoding 3.9× faster, and the
