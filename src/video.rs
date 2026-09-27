@@ -38,10 +38,12 @@ pub enum FramePixels {
         /// The RGB palette the indices point into.
         palette: Vec<[u8; 3]>,
     },
-    /// 15-bit `arrrrrgg gggbbbbb` pixels (5 bits per channel). The top bit
-    /// is not color: some codebooks (Blade Runner's) set it as an alpha
-    /// flag, and it's copied into the frame as is. RGB888 conversion ignores
-    /// it.
+    /// 15-bit `xrrrrrgg gggbbbbb` pixels (5 bits per channel). The top bit
+    /// is not color. Blade Runner's overlay codebooks set it on transparent
+    /// pixels, which the alpha-skip pointer-stream commands leave out,
+    /// keeping the frame's previous pixel (0 before anything is drawn); the
+    /// other commands copy a codebook pixel whole, bit included. The RGB
+    /// conversions ignore it.
     HiColor {
         /// One packed value per pixel.
         pixels: Vec<u16>,
@@ -72,8 +74,8 @@ pub enum FramePixelsRef<'a> {
         /// The RGB palette the indices point into.
         palette: &'a [[u8; 3]],
     },
-    /// 15-bit `arrrrrgg gggbbbbb` pixels (5 bits per channel), the top bit
-    /// an alpha flag rather than color; see [`FramePixels::HiColor`].
+    /// 15-bit `xrrrrrgg gggbbbbb` pixels (5 bits per channel), the top bit
+    /// not color; see [`FramePixels::HiColor`].
     HiColor {
         /// One packed value per pixel.
         pixels: &'a [u16],

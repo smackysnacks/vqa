@@ -16,8 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `dump_frames` example no longer panics on a step of `0` or a malformed
   step.
 - The `FramePixels::HiColor` docs said the top bit of every pixel is clear.
-  Codebooks that use it as an alpha flag (Blade Runner's) carry it into the
-  frame, and RGB888 conversion ignores it.
+  Plain block writes copy a codebook pixel whole, that bit included, while
+  the alpha-skip writes leave out the pixels that have it (Blade Runner's
+  transparent ones). RGB conversion ignores it.
 
 ## [0.6.0] - 2026-09-24
 
