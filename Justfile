@@ -42,7 +42,7 @@ lint:
 play file scale="2":
     cargo run --release --example player -- "{{file}}" "{{scale}}"
 
-# Fuzz a cargo-fuzz target (parser | adpcm | lcw); extra args go to libFuzzer, e.g. `just fuzz parser -max_total_time=60`
+# Fuzz a cargo-fuzz target (parser | adpcm | lcw | snd1); extra args go to libFuzzer, e.g. `just fuzz parser -max_total_time=60`
 fuzz target="parser" *args:
     #!/usr/bin/env bash
     if ! command -v cargo-fuzz >/dev/null; then

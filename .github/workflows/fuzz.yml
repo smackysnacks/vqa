@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parser, lcw, adpcm]
+        target: [parser, lcw, adpcm, snd1]
 
     steps:
       - uses: actions/checkout@v7

@@ -33,3 +33,10 @@ path = "fuzz_targets/lcw.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "snd1"
+path = "fuzz_targets/snd1.rs"
+test = false
+doc = false
+bench = false
