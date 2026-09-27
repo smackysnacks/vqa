@@ -63,6 +63,24 @@ fn decodes_wwlogo_audio_to_known_checksum() {
     assert_eq!(hash, 0x8f66_69e6_e5b3_4e72);
 }
 
+#[test]
+fn converts_wwlogo_frames_to_known_rgb888_checksum() {
+    let buffer = wwlogo();
+    let vqa = VQA::parse(&buffer).expect("failed to parse VQA");
+
+    // borrowed frames convert into a reused buffer; owned ones must agree
+    let mut frames = vqa.frames().expect("frame decoder rejected the header");
+    let mut rgb = vec![0; 640 * 400 * 3];
+    let mut hash = FNV_BASIS;
+    while let Some(frame) = frames.next_ref() {
+        let frame = frame.expect("failed to decode frame");
+        frame.write_rgb888(&mut rgb);
+        assert_eq!(frame.to_frame().to_rgb888(), rgb);
+        hash = fnv1a(hash, &rgb);
+    }
+    assert_eq!(hash, 0x55ba_0217_34ad_6270);
+}
+
 /// FNV-1a over one HiColor frame's pixels.
 fn frame_hash(frame: FrameRef<'_>) -> u64 {
     match frame.pixels {
