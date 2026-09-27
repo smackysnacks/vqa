@@ -7,8 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Decoding is now checked against 29 retail movies from FFmpeg's sample
+archive, which found the fixes below. Westwood ADPCM audio and three
+container variants now decode, and frames convert to 4-byte pixel formats.
+
+### Added
+
+- Westwood ADPCM (`SND1`) audio, the soundtrack codec of Kyrandia 3 and
+  other early movies, in `decode_audio`, `audio_chunks`, and the new
+  `audio::westwood` module.
+- `VQA::audio_chunks` and `AudioChunks`, which decode the soundtrack one
+  sound chunk at a time. Unlike `decode_audio`, which fails outright, they
+  yield every chunk before a malformed one, so a damaged or cut-off movie
+  still gives up its sound.
+- `to_rgba8888`, `write_rgba8888`, `to_xrgb8888` and `write_xrgb8888` on
+  `Frame` and `FrameRef`. RGBA8888 bytes suit GPU textures and image
+  libraries, and XRGB8888 (`0x00RRGGBB`) words suit software framebuffers.
+  HiColor frames convert with a SIMD kernel, as for RGB888.
+- `Frames` decodes three more kinds of movie:
+  - Lands of Lore's movies whose codebooks come in groups of frames of
+    varying length (`cbparts` 0 in the header), as their CINF chunk
+    schedules them. `FrameDecoder::swap_in_codebook_parts` does the same
+    for callers driving the decoder themselves.
+  - The older layout that has each frame's chunks at the top level instead
+    of in a VQFR chunk (Kyrandia 3's `benchl.vqa`).
+  - VQFK key frames, and VPTK and VPTD pointer tables.
+
+### Changed
+
+- `Error::UnsupportedSound` is no longer returned, now that every sound
+  chunk type decodes.
+
 ### Fixed
 
+- 8-bit movies with 4x4 blocks and at most 0x0f00 codebook entries (some
+  of Lands of Lore's) failed on their first frame. The marker for a
+  solid-color block now depends on the block size (0x0f for 4x2 blocks,
+  0xff for 4x4) rather than on the header's `maxblocks`.
+- `FrameInfo::offset` masked FINF entries with `0x3FFFFFFF`, so an entry
+  with its sync flag (bit 29) or bit 28 set got a wrong offset. The top
+  four bits are flags, as in Westwood's own VQA library.
+- The `player` example panicked on a frame that failed to decode, and
+  played without sound if any sound chunk was malformed. It now plays a
+  damaged movie as far as it goes.
 - On 32-bit targets such as wasm32, a HiColor pointer stream with long runs
   of skip commands overflowed the block position. Debug builds panicked, and
   release builds wrapped around silently. The position now saturates, so a
