@@ -6,8 +6,6 @@
 //! which composes these parsers and handles chunk types this module has no
 //! dedicated parser for.
 
-use std::convert::TryInto;
-
 use nom::{
     IResult, Parser,
     branch::alt,

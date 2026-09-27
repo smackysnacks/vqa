@@ -10,7 +10,7 @@ help:
 
 # Run cargo check on workspace
 check:
-    cargo check --workspace --tests
+    cargo check --workspace --all-targets
 
 # Run cargo build on workspace
 build:
@@ -34,9 +34,9 @@ coverage:
     fi
     cargo llvm-cov nextest --workspace
 
-# Run cargo clippy on workspace
+# Run cargo clippy on workspace, as strict as CI
 lint:
-    cargo clippy --workspace --tests
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # Play a VQA movie in a window; scale is 1, 2, or 4
 play file scale="2":

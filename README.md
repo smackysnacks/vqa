@@ -1,6 +1,6 @@
 # vqa
 
-[![CI](https://github.com/smackysnacks/vqa-parser/actions/workflows/rust.yml/badge.svg)](https://github.com/smackysnacks/vqa-parser/actions/workflows/rust.yml)
+[![CI](https://github.com/smackysnacks/vqa/actions/workflows/rust.yml/badge.svg)](https://github.com/smackysnacks/vqa/actions/workflows/rust.yml)
 [![crates.io](https://img.shields.io/crates/v/vqa.svg)](https://crates.io/crates/vqa)
 [![Crates.io Total Downloads](https://img.shields.io/crates/d/vqa)](https://crates.io/crates/vqa)
 [![docs.rs](https://img.shields.io/docsrs/vqa)](https://docs.rs/vqa)
