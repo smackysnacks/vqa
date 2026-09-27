@@ -288,9 +288,11 @@ pub fn vqa_header(input: &[u8]) -> IResult<&[u8], VQAHeader> {
 
 /// Position of one frame's data, decoded from a FINF entry.
 ///
-/// Stored FINF values are in 16-bit words with bit 30 flagging a new palette;
-/// `offset` is the decoded absolute byte position of the frame's data
-/// (its SND? chunk when the movie has sound, its VQFR chunk otherwise).
+/// A stored FINF entry holds flags in its top four bits (31 a key frame, 30
+/// a new palette, 29 a sync point) and the frame's position in 16-bit words
+/// in the other 28; `offset` is that position decoded to an absolute byte
+/// offset of the frame's data (its SND? chunk when the movie has sound, its
+/// VQFR chunk otherwise).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInfo {
     /// Absolute byte offset of the frame's data from the start of the file.
@@ -300,12 +302,14 @@ pub struct FrameInfo {
 }
 
 const FINF_PALETTE_FLAG: u32 = 0x4000_0000;
+/// The bits below the flags (Westwood's `VQAFINF_OFFSET`)
+const FINF_OFFSET: u32 = 0x0fff_ffff;
 
 /// Parse one raw FINF entry, applying the transforms described on
 /// [`FrameInfo`].
 pub fn frame_info(input: &[u8]) -> IResult<&[u8], FrameInfo> {
     map(le_u32, |raw| FrameInfo {
-        offset: (raw & (FINF_PALETTE_FLAG - 1)) * 2,
+        offset: (raw & FINF_OFFSET) * 2,
         has_palette: raw & FINF_PALETTE_FLAG != 0,
     })
     .parse(input)

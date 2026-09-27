@@ -406,10 +406,12 @@ fn frame_index_is_none_without_finf() {
 }
 
 #[test]
-fn finf_offset_is_low_30_bits_times_2_and_bit_30_flags_a_palette() {
+fn finf_offset_is_low_28_bits_times_2_and_bit_30_flags_a_palette() {
     // vqa.txt, FINF chunk: subtract the 0x40000000 palette flag, then
-    // multiply by 2 (parser::FrameInfo docs)
-    let entries = [0x0000_0010u32, 0x4000_0015, 0x3fff_ffff, 0x7fff_ffff];
+    // multiply by 2; Westwood's VQAFILE.H makes all top four bits flags,
+    // VQAFRAME_OFFSET(a) = (a & VQAFINF_OFFSET) << 1 with VQAFINF_OFFSET
+    // 0x0FFFFFFF (github.com/electronicarts/CnC_Red_Alert, WINVQ/VQA32)
+    let entries = [0x0000_0010u32, 0x4000_0015, 0x0fff_ffff, 0x4fff_ffff];
     let finf: Vec<u8> = entries.iter().flat_map(|e| e.to_le_bytes()).collect();
     let file = movie(&header_8bit(), &[chunk(b"FINF", &finf)]);
 
@@ -423,34 +425,26 @@ fn finf_offset_is_low_30_bits_times_2_and_bit_30_flags_a_palette() {
         vec![
             (0x20, false),
             (0x2a, true),
-            (0x7fff_fffe, false),
-            (0x7fff_fffe, true),
+            (0x1fff_fffe, false),
+            (0x1fff_fffe, true),
         ]
     );
 }
 
 #[test]
-fn finf_offset_ignores_bit_31() {
-    // locks current behavior: bit 31 is outside the low 30 offset bits and
-    // is not the palette flag, so it is dropped
-    let entries = [0x8000_0003u32, 0xc000_0003];
+fn finf_flag_bits_other_than_the_palette_leave_the_offset_alone() {
+    // VQAFILE.H: bit 31 flags a key frame and bit 29 a sync point, and bit
+    // 28 is also outside VQAFINF_OFFSET; none of them is the palette flag
+    let entries = [0x8000_0003u32, 0x2000_0003, 0x1000_0003, 0xf000_0003];
     let finf: Vec<u8> = entries.iter().flat_map(|e| e.to_le_bytes()).collect();
     let file = movie(&header_8bit(), &[chunk(b"FINF", &finf)]);
 
     let index = VQA::parse(&file).unwrap().frame_index.unwrap();
-    assert_eq!(
-        index,
-        vec![
-            FrameInfo {
-                offset: 6,
-                has_palette: false
-            },
-            FrameInfo {
-                offset: 6,
-                has_palette: true
-            },
-        ]
-    );
+    let decoded: Vec<(u32, bool)> = index
+        .iter()
+        .map(|entry| (entry.offset, entry.has_palette))
+        .collect();
+    assert_eq!(decoded, [(6, false), (6, false), (6, false), (6, true)]);
 }
 
 // ---------------------------------------------------------------------------
