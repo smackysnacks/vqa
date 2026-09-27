@@ -16,9 +16,10 @@ const DELTA4: [i16; 16] = [-9, -8, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 
 /// 8-bit samples.
 ///
 /// A chunk whose two sizes are equal is stored raw. Decoding is lenient,
-/// like the original players: it stops at the output size or at a command
-/// the rest of the chunk can't complete, so a malformed chunk yields fewer
-/// samples rather than an error.
+/// like the original player's: a command running past the output size is
+/// cut off at it, and one the rest of the chunk can't complete ends the
+/// chunk, so a malformed chunk yields fewer samples rather than an
+/// error.
 pub fn decompress(chunk: &[u8]) -> Vec<u8> {
     let mut samples = Vec::new();
     decompress_into(chunk, &mut samples);
@@ -47,11 +48,10 @@ pub fn decompress_into(chunk: &[u8], out: &mut Vec<u8>) {
         src = rest;
         // 0bCCnn_nnnn: a two-bit code and a six-bit count
         let count = usize::from(command & 0x3f);
-        let room = end - out.len();
         match command >> 6 {
             // count+1 bytes of four 2-bit deltas each, -2..=1, low bits first
             0 => {
-                let Some(bytes) = src.get(..count + 1).filter(|_| room >= 4 * (count + 1)) else {
+                let Some(bytes) = src.get(..count + 1) else {
                     break;
                 };
                 src = &src[count + 1..];
@@ -64,7 +64,7 @@ pub fn decompress_into(chunk: &[u8], out: &mut Vec<u8>) {
             }
             // count+1 bytes of two 4-bit deltas each, low nibble first
             1 => {
-                let Some(bytes) = src.get(..count + 1).filter(|_| room >= 2 * (count + 1)) else {
+                let Some(bytes) = src.get(..count + 1) else {
                     break;
                 };
                 src = &src[count + 1..];
@@ -83,7 +83,7 @@ pub fn decompress_into(chunk: &[u8], out: &mut Vec<u8>) {
             }
             // else count+1 raw samples, the last one becoming the prediction
             2 => {
-                let Some(raw) = src.get(..count + 1).filter(|_| room > count) else {
+                let Some(raw) = src.get(..count + 1) else {
                     break;
                 };
                 src = &src[count + 1..];
@@ -91,14 +91,12 @@ pub fn decompress_into(chunk: &[u8], out: &mut Vec<u8>) {
                 sample = raw[count];
             }
             // count+1 repeats of the current sample
-            _ => {
-                if room <= count {
-                    break;
-                }
-                out.resize(out.len() + count + 1, sample);
-            }
+            _ => out.resize(out.len() + count + 1, sample),
         }
     }
+    // Westwood's player decodes a command's samples whole and plays the
+    // chunk's first OutSize of them
+    out.truncate(end);
 }
 
 /// `sample + delta`, saturating at 0 and 255.
@@ -172,13 +170,13 @@ mod tests {
     }
 
     #[test]
-    fn stops_at_the_output_size_or_the_end_of_the_data() {
-        // a 2-bit group of 4 samples doesn't fit in the 3 left
-        assert_eq!(decompress(&chunk(3, 2, &[0x00, 0xff])), []);
-        // a 4-bit group missing its data byte
+    fn cuts_off_at_the_output_size_and_stops_at_the_end_of_the_data() {
+        // a 2-bit group of 4 samples cut to the 3 the header asks for
+        assert_eq!(decompress(&chunk(3, 2, &[0x00, 0xff])), [0x81, 0x82, 0x83]);
+        // a run of 6 after one big delta, cut to 3 in all
+        assert_eq!(decompress(&chunk(3, 2, &[0xa1, 0xc5])), [0x81; 3]);
+        // a 4-bit group missing its data byte ends the chunk
         assert_eq!(decompress(&chunk(2, 1, &[0x40])), []);
-        // a run longer than the room left stops before it
-        assert_eq!(decompress(&chunk(3, 2, &[0xa1, 0xc5])), [0x81]);
         // no header at all
         assert_eq!(decompress(&[0, 0, 0]), []);
     }
