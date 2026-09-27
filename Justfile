@@ -63,6 +63,23 @@ fuzz target="parser" *args:
     host=$(rustc +nightly -vV | sed -n 's/^host: //p')
     cargo +nightly fuzz run "$1" --target "$host" -- "${@:2}"
 
+# Download the sample movies in tests/samples.txt into samples/, checking each md5
+samples:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -v '^#' tests/samples.txt | while read -r md5 file url; do
+        [ -n "$md5" ] || continue
+        if ! echo "$md5  samples/$file" | md5sum --check --status 2>/dev/null; then
+            mkdir -p "samples/$(dirname "$file")"
+            curl -fsSL --retry 3 -o "samples/$file" "$url"
+            echo "$md5  samples/$file" | md5sum --check --quiet
+        fi
+    done
+
+# Run the tests that decode the sample movies (download them first with `just samples`)
+test-samples *args:
+    cargo test --release --test samples -- --ignored "$@"
+
 # Scan Cargo.lock for known vulnerabilities in dependencies
 audit:
     #!/usr/bin/env bash

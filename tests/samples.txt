@@ -1,0 +1,54 @@
+# Retail sample movies that tests/samples.rs checks, from the FFmpeg sample
+# archive (samples.ffmpeg.org and its FATE suite): at least one of each
+# version, pixel format, and sound codec the crate decodes. `just samples`
+# downloads them into samples/ and checks each md5.
+#
+# md5                             path under samples/          URL
+
+# FFmpeg's own regression samples: SND1 audio, and a cut v3 movie
+1d0d6b97741aca9fc8b9a60545df2c08  fate/ws_snd.vqa              https://fate-suite.ffmpeg.org/vqa/ws_snd.vqa
+130ff6f3164b52230e3cd03974dcffd1  fate/small-cut-v3.vqa        https://fate-suite.ffmpeg.org/vqa/small-cut-v3.vqa
+
+# Command & Conquer (Tiberian Dawn): v2, 8-bit
+970d51aaa57ff48a5b3220a2db0b61d5  fate/cc-demo1-partial.vqa    https://fate-suite.ffmpeg.org/vqa/cc-demo1-partial.vqa
+469de1c6758b21da69789af56e3229ce  td/cc-demo1.vqa              https://samples.ffmpeg.org/game-formats/vqa/cc-demo1.vqa
+7bd57a446bb9397c8623164be8fc0fc4  td/NOD1PRE.VQA               https://samples.ffmpeg.org/game-formats/vqa/Tiberian%20Dawn%20VQAs/NOD1PRE.VQA
+66fa05777e4448e97c718f95b423be74  td/DINO.VQA                  https://samples.ffmpeg.org/game-formats/vqa/Tiberian%20Dawn%20VQAs/DINO.VQA
+19b32cfb7bd03d22a0979ff13d486db9  td/SPYCRASH.VQA              https://samples.ffmpeg.org/game-formats/vqa/Tiberian%20Dawn%20VQAs/SPYCRASH.VQA
+
+# Red Alert: v2, 8-bit
+5bb3ba5c4c845b2da9a4d8e9218392f3  ra/allymorf.vqa              https://samples.ffmpeg.org/game-formats/vqa/Red%20Alert%20VQAs/allymorf.vqa
+a5e5b122f713a9a926ffd1537108e1ae  ra/nukestok.vqa              https://samples.ffmpeg.org/game-formats/vqa/Red%20Alert%20VQAs/nukestok.vqa
+860e930972a9d1870b42101083d75bc1  ra/redintro.vqa              https://samples.ffmpeg.org/game-formats/vqa/Red%20Alert%20VQAs/redintro.vqa
+
+# The Legend of Kyrandia III: v1, 8-bit
+6ffe332b8550edf65744a5d872f4d9b9  k3/bench0.vqa                https://samples.ffmpeg.org/game-formats/vqa/kyrandia3/bench0.vqa
+308107ab28b04bd54caee4f18b58a20b  k3/bench1.vqa                https://samples.ffmpeg.org/game-formats/vqa/kyrandia3/bench1.vqa
+ae940f763ad4234b310176842f353c45  k3/bench2.vqa                https://samples.ffmpeg.org/game-formats/vqa/kyrandia3/bench2.vqa
+10235651f5270ef1eab7b843241039f0  k3/benchl.vqa                https://samples.ffmpeg.org/game-formats/vqa/kyrandia3/benchl.vqa
+0520605347df066e18c0c1a59e103c58  k3/boat2.vqa                 https://samples.ffmpeg.org/game-formats/vqa/kyrandia3/boat2.vqa
+
+# Lands of Lore: Guardians of Destiny: v2, 8-bit, 4x4 blocks (516EFA98 with
+# maxblocks 0x07d0, where the fill marker rules part ways)
+7732adf609586b095db53d67abcea90c  lol/4D6EFA9C.VQA             https://samples.ffmpeg.org/game-formats/vqa/landsoflore/4D6EFA9C.VQA
+13ba4fe910e7e9941d4514c354191074  lol/596EFA96.VQA             https://samples.ffmpeg.org/game-formats/vqa/landsoflore/596EFA96.VQA
+7d30c4212f4c83ef2a9eda857592c9f7  lol/5D6EFA8C.VQA             https://samples.ffmpeg.org/game-formats/vqa/landsoflore/5D6EFA8C.VQA
+64a61220a68204eba75c527bc8f88e20  lol/516EFA98.VQA             https://samples.ffmpeg.org/game-formats/vqa/landsoflore/516EFA98.VQA
+
+# Dune 2000: v2, HiColor
+9731624241aa1f862c54c4cf6a3dab04  d2k/t_titl_e.vqa             https://samples.ffmpeg.org/game-formats/vqa/dune2000/t_titl_e.vqa
+
+# Tiberian Sun: v3, HiColor
+a3c9cb53e30132c6f2cae4f42517d566  ts/small.vqa                 https://samples.ffmpeg.org/game-formats/vqa/Tiberian%20Sun%20VQAs/small.vqa
+3f2a27997632e5814af89b4acb840eea  ts/gdilogo.vqa               https://samples.ffmpeg.org/game-formats/vqa/Tiberian%20Sun%20VQAs/gdilogo.vqa
+59d3508e373d1a599a5b8881af678be7  ts/orcas.vqa                 https://samples.ffmpeg.org/game-formats/vqa/Tiberian%20Sun%20VQAs/orcas.vqa
+
+# Blade Runner: v3, HiColor, alpha-skip commands
+138a70acb98b04c4fff76b359c04aff9  br/76B70801.VQA              https://samples.ffmpeg.org/game-formats/vqa/bladerunner/76B70801.VQA
+cbf118a62810f2135086c5a9568e0b15  br/A5B1D8C8.VQA              https://samples.ffmpeg.org/game-formats/vqa/bladerunner/A5B1D8C8.VQA
+e110d3681ba98e505e231c4470333be2  br/A5B1DCD2.VQA              https://samples.ffmpeg.org/game-formats/vqa/bladerunner/A5B1DCD2.VQA
+df86756c4a93a1fa3eb1c14f309c28f4  br/A1B3FCCE.VQA              https://samples.ffmpeg.org/game-formats/vqa/bladerunner/A1B3FCCE.VQA
+
+# Made with Westwood-compatible tools by a community member
+627da614b9ba8e368cf4e7dea31399eb  custom/VOYAGER.VQA           https://samples.ffmpeg.org/game-formats/vqa/custom%20VQAs/VOYAGER.VQA
+e7b219c9df9417d5d27f18d0687f77f1  custom/SATURN.VQA            https://samples.ffmpeg.org/game-formats/vqa/custom%20VQAs/SATURN.VQA

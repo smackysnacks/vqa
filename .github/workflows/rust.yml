@@ -86,6 +86,36 @@ jobs:
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir ${{ github.workspace }}
 
+  # Retail movies from FFmpeg's sample archive against pinned hashes (see
+  # tests/samples.rs); the download is cached until tests/samples.txt changes
+  samples:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Cache sample movies
+        uses: actions/cache@v6
+        with:
+          path: samples
+          key: samples-${{ hashFiles('tests/samples.txt') }}
+
+      - name: Download sample movies
+        run: just samples
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test against the sample movies
+        run: just test-samples
+
   msrv:
     runs-on: ubuntu-latest
 
