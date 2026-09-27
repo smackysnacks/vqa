@@ -4,11 +4,9 @@ on:
   push:
     branches:
       - master
-      - develop
   pull_request:
     branches:
       - master
-      - develop
 
 env:
   CARGO_TERM_COLOR: always
@@ -46,6 +44,88 @@ jobs:
         run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # The RGB conversion's NEON kernel only runs here
+  test-arm64:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --all-targets
+
+  # A 32-bit target, where usize overflows that 64-bit builds never hit
+  # panic; wasm is also where browser players run
+  test-wasm32:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
+
+      - name: Install wasmtime
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
+
+      - uses: Swatinem/rust-cache@v2
+
+      # the golden tests read the sample movie by its absolute path
+      - name: Run tests
+        run: cargo test --target wasm32-wasip1 --lib --tests
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir ${{ github.workspace }}
+
+  msrv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust 1.89
+        run: rustup toolchain install 1.89 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      # the declared rust-version; dependencies resolve to versions that
+      # support it
+      - name: Check the library
+        run: cargo +1.89 check --lib
+
+  # Running the fuzz targets needs nightly (see fuzz.yml), but they build on
+  # stable, which catches API changes that break them
+  fuzz-targets:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Check the fuzz targets
+        run: cargo check --manifest-path fuzz/Cargo.toml
+
+  semver:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # compares the public API against the latest release on crates.io
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
 
   audit:
     runs-on: ubuntu-latest
