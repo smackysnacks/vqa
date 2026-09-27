@@ -6,7 +6,7 @@
 use nom::Parser;
 use nom::bytes::complete::tag;
 
-use crate::audio::{CodecState, decompress_into};
+use crate::audio::{CodecState, decompress_into, westwood};
 use crate::error::Error;
 use crate::parser::{
     FrameInfo, RawChunk, VQAHeader, VQAVersion, form_chunk, frame_info, raw_chunk, vqa_header,
@@ -76,10 +76,9 @@ impl<'a> VQA<'a> {
 
     /// Decode the whole soundtrack into interleaved signed 16-bit samples
     /// ([`VQAHeader::num_channels`] channels at [`VQAHeader::sample_rate`]
-    /// Hz), handling the per-version stereo layouts of SND2 data and raw
-    /// SND0 PCM. SND1 (Westwood ADPCM) is not supported yet. Fails on the
-    /// first malformed chunk; [`VQA::audio_chunks`] keeps the sound before
-    /// it.
+    /// Hz): IMA ADPCM (`SND2`) in its per-version stereo layouts, Westwood
+    /// ADPCM (`SND1`), and raw PCM (`SND0`). Fails on the first malformed
+    /// chunk; [`VQA::audio_chunks`] keeps the sound before it.
     pub fn decode_audio(&self) -> Result<Vec<i16>, Error> {
         let mut chunks = self.audio_chunks();
         let mut samples = Vec::new();
@@ -101,6 +100,7 @@ impl<'a> VQA<'a> {
             pcm16: self.header.bit_depth() == 16,
             left: CodecState::new(),
             right: CodecState::new(),
+            bytes: Vec::new(),
             done: false,
         }
     }
@@ -120,6 +120,8 @@ pub struct AudioChunks<'a> {
     pcm16: bool,
     left: CodecState,
     right: CodecState,
+    /// scratch space for unsigned 8-bit SND1 samples
+    bytes: Vec<u8>,
     done: bool,
 }
 
@@ -141,8 +143,9 @@ impl AudioChunks<'_> {
             match &chunk.id {
                 b"SND2" => self.decode_snd2(chunk.data, samples),
                 b"SND1" => {
-                    self.done = true;
-                    return Some(Err(Error::UnsupportedSound("SND1 (Westwood ADPCM)")));
+                    self.bytes.clear();
+                    westwood::decompress_into(chunk.data, &mut self.bytes);
+                    samples.extend(self.bytes.iter().map(|&b| widen(b)));
                 }
                 // raw PCM: signed 16-bit, or unsigned 8-bit
                 b"SND0" if self.pcm16 => samples.extend(

@@ -68,7 +68,8 @@
 //!   consumers that want to walk the container themselves.
 //! - [`video`]: [`FrameDecoder`], the stateful codebook/palette/frame
 //!   assembler driving [`Frames`].
-//! - [`audio`]: the IMA ADPCM decoder behind `SND2` sound chunks.
+//! - [`audio`]: the IMA ADPCM and Westwood ADPCM decoders behind `SND2` and
+//!   `SND1` sound chunks.
 //! - [`lcw`]: LCW ("Format80") decompression, used by every `*Z` chunk.
 //!
 //! # Format support
@@ -76,9 +77,8 @@
 //! All three container versions (v1-v3) parse. Video decoding covers both
 //! the 8-bit palettized scheme (`VPT?` pointer tables) and the HiColor
 //! 15-bit scheme (`VPTR`/`VPRZ` command streams, including the Blade Runner
-//! alpha-skip commands). Audio decoding covers IMA ADPCM (`SND2`) and raw
-//! PCM (`SND0`); Westwood ADPCM (`SND1`, found in early 8-bit-audio movies)
-//! is not supported yet.
+//! alpha-skip commands). Audio decoding covers IMA ADPCM (`SND2`), Westwood
+//! ADPCM (`SND1`, in early 8-bit-audio movies), and raw PCM (`SND0`).
 //!
 //! Malformed input fails with an [`Error`] rather than panicking, and
 //! allocation sizes taken from the file are capped, so the crate is safe to

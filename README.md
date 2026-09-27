@@ -19,7 +19,7 @@ Tiberian Sun, and Nox.
 |-----------|-------------------------------------------------------------------------------------------------|
 | Container | All three versions (v1–v3), both 8-bit and HiColor movies                                        |
 | Video     | 8-bit palettized (`VPT?` pointer tables) and 15-bit HiColor (`VPTR`/`VPRZ` command streams, including the Blade Runner alpha-skip commands) |
-| Audio     | IMA ADPCM (`SND2`) and raw PCM (`SND0`); Westwood ADPCM (`SND1`, early 8-bit-audio movies) is not supported yet |
+| Audio     | IMA ADPCM (`SND2`), Westwood ADPCM (`SND1`, early 8-bit-audio movies), and raw PCM (`SND0`) |
 
 Malformed input fails with an error rather than panicking, and allocation
 sizes taken from the file are capped, so the crate is safe to run on
@@ -56,8 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 For consumers that want to walk the container themselves, the `parser`
 module exposes zero-copy [nom](https://crates.io/crates/nom) parsers for
 every chunk type, with `lcw` (LCW/"Format80" decompression), `video`
-(`FrameDecoder`), and `audio` (IMA ADPCM) as the decoding layers underneath.
-See the [API docs](https://docs.rs/vqa) for the full tour.
+(`FrameDecoder`), and `audio` (IMA and Westwood ADPCM) as the decoding layers
+underneath. See the [API docs](https://docs.rs/vqa) for the full tour.
 
 ## Examples
 

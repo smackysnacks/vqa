@@ -731,16 +731,30 @@ fn snd0_8bit_samples_are_unsigned_and_widened_to_signed_16bit() {
 }
 
 #[test]
-fn snd1_westwood_adpcm_is_unsupported() {
-    // vqa.txt, SND1 chunk: Westwood ADPCM, which the crate does not decode
+fn snd1_westwood_adpcm_decodes_each_chunk_from_silence() {
+    // vqa.txt, SND1 chunk and Appendix C: a header of OutSize and Size
+    // words, then commands; CurSample starts at 0x80 in every chunk, and a
+    // chunk whose sizes are equal is stored raw. The unsigned 8-bit samples
+    // widen as SND0's do, (b - 128) << 8
     let file = movie(
         &sound_header(VQAVersion::One, 1, 8),
-        &[chunk(b"SND1", &[4, 0, 2, 0, 0x12, 0x34])],
+        &[
+            // 0x41: 4-bit deltas for 2 bytes; nibbles 0, f, 7, 8 are -9, +8,
+            // -1, 0 (WSTable4bit): 0x77, 0x7f, 0x7e, 0x7e
+            chunk(b"SND1", &[4, 0, 3, 0, 0x41, 0xf0, 0x87]),
+            // 0x00: 2-bit deltas for 1 byte, all +1 (WSTable2bit[3]), from
+            // 0x80 again: 0x81, 0x82, 0x83, 0x84
+            chunk(b"SND1", &[4, 0, 2, 0, 0x00, 0xff]),
+            // raw
+            chunk(b"SND1", &[2, 0, 2, 0, 0x00, 0xff]),
+        ],
     );
-    assert!(matches!(
-        decode_audio(&file),
-        Err(Error::UnsupportedSound(_))
-    ));
+    let widen = |b: i16| (b - 128) << 8;
+    let expected: Vec<i16> = [0x77, 0x7f, 0x7e, 0x7e, 0x81, 0x82, 0x83, 0x84, 0x00, 0xff]
+        .into_iter()
+        .map(widen)
+        .collect();
+    assert_eq!(decode_audio(&file), Ok(expected));
 }
 
 // ---------------------------------------------------------------------------

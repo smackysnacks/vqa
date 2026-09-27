@@ -15,7 +15,9 @@ pub enum Error {
     TooLarge(&'static str),
     /// Video data was malformed (the string says how).
     Video(&'static str),
-    /// The soundtrack uses a codec this crate does not support yet.
+    /// The soundtrack uses a codec this crate does not support. Every sound
+    /// chunk type VQA movies use (`SND0`-`SND2`) now decodes, so nothing
+    /// returns this.
     UnsupportedSound(&'static str),
 }
 
