@@ -236,6 +236,14 @@ mod tests {
     }
 
     #[test]
+    fn tolerates_missing_end_marker_in_the_relative_variant() {
+        // the NUL flag byte doesn't count toward the stream: Dune 2000's
+        // t_titl_e.vqa has a relative codebook that ends without a marker
+        assert_eq!(decompress(b"\x00\x82ab", 64).unwrap(), b"ab");
+        assert_eq!(decompress(b"\x00\x82ab\x00\x02", 64).unwrap(), b"ababa");
+    }
+
+    #[test]
     fn short_copy_references_recent_output() {
         // literal "abc", then copy 3 bytes from 3 behind the write position
         assert_eq!(decompress(b"\x83abc\x00\x03\x80", 64).unwrap(), b"abcabc");
