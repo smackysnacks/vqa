@@ -151,6 +151,30 @@ fn time(path: &str) {
             "  write_rgb888   {:8.1} us/frame  (reused buffer)",
             rgb.as_secs_f64() * 1e6 / 100.0
         );
+
+        let mut out = vec![0; frame.width * frame.height * 4];
+        let rgba = best(|| {
+            for _ in 0..100 {
+                frame.write_rgba8888(&mut out);
+                black_box(&out);
+            }
+        });
+        println!(
+            "  write_rgba8888 {:8.1} us/frame  (reused buffer)",
+            rgba.as_secs_f64() * 1e6 / 100.0
+        );
+
+        let mut out = vec![0; frame.width * frame.height];
+        let xrgb = best(|| {
+            for _ in 0..100 {
+                frame.write_xrgb8888(&mut out);
+                black_box(&out);
+            }
+        });
+        println!(
+            "  write_xrgb8888 {:8.1} us/frame  (reused buffer)",
+            xrgb.as_secs_f64() * 1e6 / 100.0
+        );
     }
 
     // every compressed sub-chunk of the video stream

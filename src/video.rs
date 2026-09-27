@@ -110,6 +110,36 @@ impl Frame {
     pub fn write_rgb888(&self, out: &mut [u8]) {
         self.view().write_rgb888(out);
     }
+
+    /// Convert the frame to RGBA8888 bytes, row-major, alpha opaque; see
+    /// [`FrameRef::to_rgba8888`].
+    pub fn to_rgba8888(&self) -> Vec<u8> {
+        self.view().to_rgba8888()
+    }
+
+    /// Like [`Frame::to_rgba8888`], but writes into `out`.
+    ///
+    /// # Panics
+    ///
+    /// If `out` isn't exactly four bytes per pixel long.
+    pub fn write_rgba8888(&self, out: &mut [u8]) {
+        self.view().write_rgba8888(out);
+    }
+
+    /// Convert the frame to packed `0x00RRGGBB` words, row-major; see
+    /// [`FrameRef::to_xrgb8888`].
+    pub fn to_xrgb8888(&self) -> Vec<u32> {
+        self.view().to_xrgb8888()
+    }
+
+    /// Like [`Frame::to_xrgb8888`], but writes into `out`.
+    ///
+    /// # Panics
+    ///
+    /// If `out` isn't exactly one word per pixel long.
+    pub fn write_xrgb8888(&self, out: &mut [u32]) {
+        self.view().write_xrgb8888(out);
+    }
 }
 
 impl FrameRef<'_> {
@@ -155,6 +185,66 @@ impl FrameRef<'_> {
                 rgb::indexed_to_rgb888(pixels, palette, out);
             }
             FramePixelsRef::HiColor { pixels } => rgb::hicolor_to_rgb888(pixels, out),
+        }
+    }
+
+    /// Convert the frame to RGBA8888 bytes, row-major: R, G, B, then an
+    /// opaque 0xff alpha, the layout GPU textures and most image libraries
+    /// take. Indexed pixels with no palette entry come out black, and
+    /// HiColor pixels' top bit is ignored, as for [`FrameRef::to_rgb888`].
+    pub fn to_rgba8888(&self) -> Vec<u8> {
+        let mut out = vec![0; self.pixel_count() * 4];
+        self.write_rgba8888(&mut out);
+        out
+    }
+
+    /// Like [`FrameRef::to_rgba8888`], but writes into `out`, so one buffer
+    /// can be reused across frames.
+    ///
+    /// # Panics
+    ///
+    /// If `out` isn't exactly four bytes per pixel long.
+    pub fn write_rgba8888(&self, out: &mut [u8]) {
+        assert_eq!(
+            out.len(),
+            self.pixel_count() * 4,
+            "RGBA8888 output must hold four bytes per pixel"
+        );
+        match self.pixels {
+            FramePixelsRef::Indexed { pixels, palette } => {
+                rgb::indexed_to_rgba8888(pixels, palette, out);
+            }
+            FramePixelsRef::HiColor { pixels } => rgb::hicolor_to_rgba8888(pixels, out),
+        }
+    }
+
+    /// Convert the frame to one `0x00RRGGBB` word per pixel, row-major: the
+    /// layout of software framebuffers such as minifb's and softbuffer's.
+    /// Indexed pixels with no palette entry come out black, and HiColor
+    /// pixels' top bit is ignored, as for [`FrameRef::to_rgb888`].
+    pub fn to_xrgb8888(&self) -> Vec<u32> {
+        let mut out = vec![0; self.pixel_count()];
+        self.write_xrgb8888(&mut out);
+        out
+    }
+
+    /// Like [`FrameRef::to_xrgb8888`], but writes into `out`, so one buffer
+    /// can be reused across frames.
+    ///
+    /// # Panics
+    ///
+    /// If `out` isn't exactly one word per pixel long.
+    pub fn write_xrgb8888(&self, out: &mut [u32]) {
+        assert_eq!(
+            out.len(),
+            self.pixel_count(),
+            "XRGB8888 output must hold one word per pixel"
+        );
+        match self.pixels {
+            FramePixelsRef::Indexed { pixels, palette } => {
+                rgb::indexed_to_xrgb8888(pixels, palette, out);
+            }
+            FramePixelsRef::HiColor { pixels } => rgb::hicolor_to_xrgb8888(pixels, out),
         }
     }
 

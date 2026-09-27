@@ -71,12 +71,31 @@ fn converts_wwlogo_frames_to_known_rgb888_checksum() {
     // borrowed frames convert into a reused buffer; owned ones must agree
     let mut frames = vqa.frames().expect("frame decoder rejected the header");
     let mut rgb = vec![0; 640 * 400 * 3];
+    let mut rgba = vec![0; 640 * 400 * 4];
+    let mut xrgb = vec![0; 640 * 400];
     let mut hash = FNV_BASIS;
+    let mut n = 0;
     while let Some(frame) = frames.next_ref() {
         let frame = frame.expect("failed to decode frame");
         frame.write_rgb888(&mut rgb);
         assert_eq!(frame.to_frame().to_rgb888(), rgb);
         hash = fnv1a(hash, &rgb);
+
+        // the 4-byte formats hold the same colors (checked on every 13th
+        // frame to keep debug builds quick)
+        if n % 13 == 0 {
+            let rgb = rgb.as_chunks::<3>().0;
+            frame.write_rgba8888(&mut rgba);
+            let expected: Vec<u8> = rgb.iter().flat_map(|&[r, g, b]| [r, g, b, 0xff]).collect();
+            assert!(rgba == expected, "RGBA8888 of frame {n}");
+            frame.write_xrgb8888(&mut xrgb);
+            let expected: Vec<u32> = rgb
+                .iter()
+                .map(|&[r, g, b]| u32::from_be_bytes([0, r, g, b]))
+                .collect();
+            assert!(xrgb == expected, "XRGB8888 of frame {n}");
+        }
+        n += 1;
     }
     assert_eq!(hash, 0x55ba_0217_34ad_6270);
 }

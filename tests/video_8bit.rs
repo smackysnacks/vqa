@@ -704,6 +704,28 @@ fn indexed_frames_convert_to_palette_colors_row_major() {
     let mut out = [0xaa; 24];
     frame.write_rgb888(&mut out);
     assert_eq!(out, RGB);
+
+    // the 4-byte formats hold the same colors: R, G, B, opaque alpha
+    // bytes, and 0x00RRGGBB words
+    let (rgba, xrgb) = four_byte(&RGB);
+    assert_eq!(frame.to_rgba8888(), rgba);
+    assert_eq!(frame.to_xrgb8888(), xrgb);
+    let mut out = [0xaa; 32];
+    frame.write_rgba8888(&mut out);
+    assert_eq!(out[..], rgba);
+    let mut out = [0xaaaa_aaaa; 8];
+    frame.write_xrgb8888(&mut out);
+    assert_eq!(out[..], xrgb);
+}
+
+/// RGB888 bytes as RGBA8888 bytes (alpha opaque) and XRGB8888 words.
+fn four_byte(rgb: &[u8]) -> (Vec<u8>, Vec<u32>) {
+    let rgb = rgb.as_chunks::<3>().0;
+    let rgba = rgb.iter().flat_map(|&[r, g, b]| [r, g, b, 0xff]);
+    let xrgb = rgb
+        .iter()
+        .map(|&[r, g, b]| u32::from_be_bytes([0, r, g, b]));
+    (rgba.collect(), xrgb.collect())
 }
 
 #[test]
@@ -723,6 +745,12 @@ fn borrowed_frames_convert_to_palette_colors_row_major() {
     let mut out = [0xaa; 24];
     frame.write_rgb888(&mut out);
     assert_eq!(out, RGB);
+
+    let (rgba, xrgb) = four_byte(&RGB);
+    assert_eq!(frame.to_rgba8888(), rgba);
+    let mut out = [0xaaaa_aaaa; 8];
+    frame.write_xrgb8888(&mut out);
+    assert_eq!(out[..], xrgb);
 }
 
 #[test]
@@ -745,6 +773,10 @@ fn indices_past_the_palette_come_out_black() {
     let mut out = [0xaa; 24];
     frame.write_rgb888(&mut out);
     assert_eq!(out, rgb);
+    // opaque black in the 4-byte formats
+    let (rgba, xrgb) = four_byte(&rgb);
+    assert_eq!(frame.to_rgba8888(), rgba);
+    assert_eq!(frame.to_xrgb8888(), xrgb);
 
     // with no palette at all, every pixel is black
     let vqfr = [
@@ -772,6 +804,23 @@ fn borrowed_write_rgb888_panics_on_a_long_buffer() {
     let mut decoder = FrameDecoder::new(&rgb_header()).unwrap();
     let frame = decoder.decode_frame_ref(&rgb_vqfr([0; 8])).unwrap();
     frame.write_rgb888(&mut [0; 25]);
+}
+
+#[test]
+#[should_panic(expected = "four bytes per pixel")]
+fn write_rgba8888_panics_on_a_short_buffer() {
+    // locks current behavior (documented on Frame::write_rgba8888)
+    let frame = decode_one(&rgb_header(), &[rgb_vqfr([0; 8])]).unwrap();
+    frame.write_rgba8888(&mut [0; 31]);
+}
+
+#[test]
+#[should_panic(expected = "one word per pixel")]
+fn borrowed_write_xrgb8888_panics_on_a_long_buffer() {
+    // locks current behavior (documented on FrameRef::write_xrgb8888)
+    let mut decoder = FrameDecoder::new(&rgb_header()).unwrap();
+    let frame = decoder.decode_frame_ref(&rgb_vqfr([0; 8])).unwrap();
+    frame.write_xrgb8888(&mut [0; 9]);
 }
 
 #[test]
