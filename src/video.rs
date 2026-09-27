@@ -489,7 +489,7 @@ impl FrameDecoder {
         &mut self,
         stream: &[u8],
     ) -> Result<(), Error> {
-        let mut pos = 0; // current block, row-major
+        let mut pos = 0usize; // current block, row-major
         let mut sp = 0;
         while sp < stream.len() {
             let val = match stream.get(sp..sp + 2) {
@@ -500,8 +500,9 @@ impl FrameDecoder {
 
             let run_count = usize::from(val >> 8 & 0x1f) + 1;
             match val >> 13 {
-                // skip blocks (leave them unchanged)
-                0b000 => pos += usize::from(val & 0x1fff),
+                // skip blocks (leave them unchanged); saturating, since a
+                // long run of skips could otherwise overflow a 32-bit usize
+                0b000 => pos = pos.saturating_add(usize::from(val & 0x1fff)),
                 // write one of the first 256 blocks 2*(run+1) times
                 0b001 => {
                     for _ in 0..run_count * 2 {
@@ -906,6 +907,20 @@ mod tests {
         assert_eq!(pixels[0], 0x0300);
         assert_eq!(pixels[4], 0); // untouched
         assert_eq!(pixels[2 * 8], 0x0300);
+    }
+
+    #[test]
+    fn long_skip_runs_do_not_overflow_the_block_position() {
+        // 600,000 maximal skips move 4.9 billion blocks - past u32::MAX,
+        // which overflowed `usize` on 32-bit targets - then a write, which
+        // lands past the frame
+        let mut decoder = FrameDecoder::new(&hicolor_header()).unwrap();
+        let mut stream = 0b000_1111111111111u16.to_le_bytes().repeat(600_000);
+        stream.extend(0b011_0000000000000u16.to_le_bytes());
+        assert_eq!(
+            decoder.decode_frame(&chunk("VPTR", &stream)),
+            Err(Error::Video("pointer stream writes past the frame"))
+        );
     }
 
     #[test]
