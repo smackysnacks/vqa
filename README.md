@@ -23,7 +23,7 @@ Tiberian Sun, and Nox.
 
 Malformed input fails with an error rather than panicking, and allocation
 sizes taken from the file are capped, so the crate is safe to run on
-untrusted data (see `fuzz/`).
+untrusted data. Its fuzz targets (see `fuzz/`) run nightly in CI.
 
 ## Quick start
 

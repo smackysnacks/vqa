@@ -1,0 +1,70 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        default: "600"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parser, lcw, adpcm]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      # Each run starts from the corpus the last one saved
+      - name: Restore corpus
+        uses: actions/cache/restore@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Seed the parser corpus with the sample movie
+        if: matrix.target == 'parser'
+        run: mkdir -p fuzz/corpus/parser && cp examples/wwlogo.vqa fuzz/corpus/parser/
+
+      # Pass the host triple explicitly: a prebuilt cargo-fuzz defaults to the
+      # triple it was built for (e.g. musl), which breaks ASan on a gnu host
+      - name: Fuzz
+        run: >-
+          cargo +nightly fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu --
+          -max_total_time=${{ inputs.seconds || 600 }} -fork=4
+
+      - name: Save corpus
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}

@@ -76,7 +76,7 @@
 //!
 //! Malformed input fails with an [`Error`] rather than panicking, and
 //! allocation sizes taken from the file are capped, so the crate is safe to
-//! run on untrusted data (it is continuously fuzzed).
+//! run on untrusted data (its fuzz targets run nightly in CI).
 //!
 //! The `doc/` directory of the repository carries the format references this
 //! crate is written against: `vqa.txt` for v1/v2 and `hc-vqa.txt` for the
