@@ -114,11 +114,9 @@ fn v1_tables_pair_loval_and_hival_per_block() {
 fn v2_hival_0x0f_fills_the_block_with_loval() {
     // vqa.txt, VERSION 2 INDEX TABLE LAYOUT: LoVal in the table's first
     // half, HiVal in the second; HiVal 0x0f fills the block with color
-    // LoVal, anything else draws entry HiVal*256+LoVal. The NOTE found no
-    // header entry selecting 0x0f over the hi-res movies' 0xff and guesses
-    // from the block size ("If BlockW=2 -> 0x0f is used, if BlockH=4 ->
-    // 0xff is used"); this crate instead uses 0x0f unless maxblocks
-    // exceeds 0x0f00 (FrameDecoder::new), and here it is 0x0f00
+    // LoVal, anything else draws entry HiVal*256+LoVal. 0x0f is the marker
+    // of 4x2 blocks, hardcoded in Westwood's 4x2 drawer (`cmp bh,00Fh` in
+    // UnVQ_4x2, WINVQ/VQA32/UNVQBUFF.ASM of EA's GPL Red Alert source)
     let book = codebook_4x2(
         0x0103,
         &[
@@ -146,65 +144,31 @@ fn v2_hival_0x0f_fills_the_block_with_loval() {
 }
 
 #[test]
-fn v2_hires_movies_fill_on_hival_0xff_and_index_with_0x0f() {
-    // vqa.txt, VERSION 2 INDEX TABLE LAYOUT and its NOTE: the hi-res movies
-    // (up to 0xff00 blocks, per CBF? chunk) mark fills with HiVal 0xff, so
-    // HiVal 0x0f is an ordinary index: entry 0x0f00+LoVal. The NOTE found
-    // no header entry selecting the marker and guesses from the block size
-    // (BlockW=2 -> 0x0f, BlockH=4 -> 0xff); this crate instead picks 0xff
-    // when maxblocks exceeds 0x0f00 (FrameDecoder::new)
+fn v2_4x2_blocks_fill_on_hival_0x0f_whatever_maxblocks() {
+    // Westwood's 4x2 drawer compares HiVal with 0x0f alone (UNVQBUFF.ASM,
+    // see above), whatever the header's maxblocks (CBentries), which sizes
+    // only the codebook buffer (LOADER.CPP); so even at maxblocks 0xff00
+    // HiVal 0xff is an index, here past the codebook
     let header = VQAHeader {
         maxblocks: 0xff00,
         ..header_8bit()
     };
-    let book = codebook_4x2(
-        0x0f02,
-        &[
-            (0, [0, 1, 2, 3, 4, 5, 6, 7]),
-            (1, [10, 11, 12, 13, 14, 15, 16, 17]),
-            (0x0f01, [20, 21, 22, 23, 24, 25, 26, 27]),
-        ],
-    );
-    let table = [
-        66, 0x01, 0x01, 0x00, /* HiVal */ 0xff, 0x0f, 0x00, 0x00,
-    ];
-
-    let frame = decode_one(&header, &[chunk(b"CBF0", &book), chunk(b"VPT0", &table)]).unwrap();
-    #[rustfmt::skip]
-    assert_eq!(pixels(&frame), [
-        66, 66, 66, 66,   20, 21, 22, 23,
-        66, 66, 66, 66,   24, 25, 26, 27,
-        10, 11, 12, 13,    0,  1,  2,  3,
-        14, 15, 16, 17,    4,  5,  6,  7,
-    ]);
-}
-
-#[test]
-fn fill_marker_switches_to_0xff_just_above_0x0f00_maxblocks() {
-    // locks current behavior: vqa.txt leaves the selector open (its NOTE
-    // guesses from the block size), and FrameDecoder::new picks 0xff for
-    // any maxblocks above 0x0f00
-    let table = [66, 66, 66, 66, /* HiVal */ 0xff, 0xff, 0xff, 0xff];
-    let header = VQAHeader {
-        maxblocks: 0x0f01,
-        ..header_8bit()
-    };
+    let table = [66, 66, 66, 66, /* HiVal */ 0x0f, 0x0f, 0x0f, 0x0f];
     let frame = decode_one(&header, &[chunk(b"VPT0", &table)]).unwrap();
     assert_eq!(pixels(&frame), [66; 32]);
 
-    // at 0x0f00 the same table asks for entry 0xff42 of an empty codebook
+    let table = [66, 66, 66, 66, /* HiVal */ 0xff, 0xff, 0xff, 0xff];
     assert_eq!(
-        decode_one(&header_8bit(), &[chunk(b"VPT0", &table)]),
+        decode_one(&header, &[chunk(b"VPT0", &table)]),
         Err(Error::Video("block index outside the codebook"))
     );
 }
 
 #[test]
-fn maxblocks_0_keeps_the_0x0f_fill_marker_but_caps_the_codebook_at_0xff00() {
+fn maxblocks_0_caps_the_codebook_at_0xff00_entries() {
     // locks current behavior: FrameDecoder::new reads maxblocks 0 as 0xff00
-    // entries for the codebook cap, but picks the fill marker from the raw
-    // header value, so 0x0f still marks a fill while entries past 0x0f00
-    // are allowed and reachable with HiVal 0x10 and up
+    // entries for the codebook cap, so entries past 0x0f00 are allowed and
+    // reachable with HiVal 0x10 and up; 0x0f still marks a 4x2 fill
     let header = VQAHeader {
         maxblocks: 0,
         ..header_8bit()
@@ -270,9 +234,8 @@ const FRAME_4X4: [u8; 64] = [
 #[test]
 fn renders_v2_4x4_blocks() {
     // vqa.txt, VERSION 2 INDEX TABLE LAYOUT on an 8x8 frame of 4x4 blocks
-    // (the renderer's 4x4 path). maxblocks 0xff00 makes HiVal 0xff the
-    // fill marker, as the NOTE guesses for BlockH=4 and as this crate
-    // picks for maxblocks above 0x0f00
+    // (the renderer's 4x4 path), whose fill marker is HiVal 0xff: the NOTE
+    // guesses so for BlockH=4, and Lands of Lore's 4x4 movies use it
     let header = header_4x4(VQAVersion::Two, 0xff00);
     let table = [1, 99, 0, 1, /* HiVal */ 0, 0xff, 0, 0];
 
@@ -283,20 +246,18 @@ fn renders_v2_4x4_blocks() {
 }
 
 #[test]
-fn v2_4x4_blocks_keep_the_0x0f_fill_marker_up_to_0x0f00_maxblocks() {
-    // locks current behavior, where this crate departs from vqa.txt's NOTE:
-    // the NOTE guesses that BlockH=4 means the 0xff fill marker, but the
-    // crate keys the marker on maxblocks alone, so a 4x4 movie with
-    // maxblocks 0x0f00 fills on HiVal 0x0f and reads 0xff as an index
-    let header = header_4x4(VQAVersion::Two, 0x0f00);
+fn v2_4x4_blocks_fill_on_hival_0xff_whatever_maxblocks() {
+    // as above; Lands of Lore's 516EFA98.VQA has 4x4 blocks and maxblocks
+    // 0x07d0, and fills with 0xff: 0x0f is an index, entry 0x0f63 here,
+    // past the two-entry codebook
+    let header = header_4x4(VQAVersion::Two, 0x07d0);
     let book = chunk(b"CBF0", &codebook_4x4());
 
-    let table = chunk(b"VPT0", &[1, 99, 0, 1, /* HiVal */ 0, 0x0f, 0, 0]);
+    let table = chunk(b"VPT0", &[1, 99, 0, 1, /* HiVal */ 0, 0xff, 0, 0]);
     let frame = decode_one(&header, &[book.clone(), table]).unwrap();
     assert_eq!(pixels(&frame), FRAME_4X4);
 
-    // HiVal 0xff asks for entry 0xff63 of the two-entry codebook
-    let table = chunk(b"VPT0", &[1, 99, 0, 1, /* HiVal */ 0, 0xff, 0, 0]);
+    let table = chunk(b"VPT0", &[1, 99, 0, 1, /* HiVal */ 0, 0x0f, 0, 0]);
     assert_eq!(
         decode_one(&header, &[book, table]),
         Err(Error::Video("block index outside the codebook"))

@@ -326,13 +326,10 @@ impl FrameDecoder {
             block_h,
             blocks_x: width / block_w,
             blocks_y: height / block_h,
-            // normal movies hold at most 0x0f00 codebook entries, so 0x0f
-            // can flag a fill; the hi-res movies use 0xff instead
-            fill_sentinel: if header.maxblocks > 0x0f00 {
-                0xff
-            } else {
-                0x0f
-            },
+            // 4x2 movies flag a fill with 0x0f (hardcoded in Westwood's own
+            // 4x2 drawer), 4x4 ones - Lands of Lore's - with 0xff whatever
+            // their codebook size
+            fill_sentinel: if block_h == 4 { 0xff } else { 0x0f },
             max_codebook_bytes,
             cbparts: usize::from(header.cbparts),
             codebook8: Vec::new(),
