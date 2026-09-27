@@ -38,9 +38,12 @@ pub enum FramePixels {
         /// The RGB palette the indices point into.
         palette: Vec<[u8; 3]>,
     },
-    /// 15-bit `0rrrrrgg gggbbbbb` pixels (5 bits per channel).
+    /// 15-bit `arrrrrgg gggbbbbb` pixels (5 bits per channel). The top bit
+    /// is not color: some codebooks (Blade Runner's) set it as an alpha
+    /// flag, and it's copied into the frame as is. RGB888 conversion ignores
+    /// it.
     HiColor {
-        /// One packed 15-bit value per pixel.
+        /// One packed value per pixel.
         pixels: Vec<u16>,
     },
 }
@@ -69,9 +72,10 @@ pub enum FramePixelsRef<'a> {
         /// The RGB palette the indices point into.
         palette: &'a [[u8; 3]],
     },
-    /// 15-bit `0rrrrrgg gggbbbbb` pixels (5 bits per channel).
+    /// 15-bit `arrrrrgg gggbbbbb` pixels (5 bits per channel), the top bit
+    /// an alpha flag rather than color; see [`FramePixels::HiColor`].
     HiColor {
-        /// One packed 15-bit value per pixel.
+        /// One packed value per pixel.
         pixels: &'a [u16],
     },
 }
