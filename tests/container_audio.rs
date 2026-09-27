@@ -744,6 +744,76 @@ fn snd1_westwood_adpcm_is_unsupported() {
 }
 
 // ---------------------------------------------------------------------------
+// VQA::audio_chunks
+
+#[test]
+fn audio_chunks_yield_each_sound_chunk_in_file_order() {
+    // one item per SND? chunk, the same samples decode_audio returns, with
+    // the IMA predictor carried across (vqa.txt, Appendix B)
+    let file = movie(
+        &sound_header(VQAVersion::Two, 1, 16),
+        &[
+            chunk(b"SND2", &MONO[..2]),
+            chunk(b"VQFR", &[]),
+            chunk(b"SND2", &MONO[2..]),
+            chunk(b"SND0", &[0x34, 0x12]),
+        ],
+    );
+    let vqa = VQA::parse(&file).unwrap();
+    let chunks: Vec<Vec<i16>> = vqa.audio_chunks().map(Result::unwrap).collect();
+    assert_eq!(
+        chunks,
+        [
+            MONO_SAMPLES[..4].to_vec(),
+            MONO_SAMPLES[4..].to_vec(),
+            vec![0x1234]
+        ]
+    );
+}
+
+#[test]
+fn audio_chunks_keep_the_sound_before_a_cut_off_chunk() {
+    // a chunk whose size runs past the end of the file is a desync (vqa.txt:
+    // the size says how many bytes follow): the chunks before it still
+    // decode, then one error ends the iteration. decode_audio fails outright
+    let mut file = movie(
+        &sound_header(VQAVersion::Two, 1, 16),
+        &[chunk(b"SND2", &MONO[..2]), chunk(b"SND2", &MONO[2..])],
+    );
+    // the last chunk is 1 data byte and its pad: cut both
+    file.truncate(file.len() - 2);
+    let vqa = VQA::parse(&file).unwrap();
+
+    let mut chunks = vqa.audio_chunks();
+    assert_eq!(chunks.next(), Some(Ok(MONO_SAMPLES[..4].to_vec())));
+    assert_eq!(chunks.next(), Some(Err(Error::Parse)));
+    assert_eq!(chunks.next(), None);
+    assert_eq!(vqa.decode_audio(), Err(Error::Parse));
+}
+
+#[test]
+fn audio_chunks_next_into_appends_and_clones_resume_in_step() {
+    // first principles: next_into appends where next allocates; a clone
+    // carries the IMA predictors, so both copies decode the rest alike
+    let file = movie(
+        &sound_header(VQAVersion::Two, 1, 16),
+        &[chunk(b"SND2", &MONO[..1]), chunk(b"SND2", &MONO[1..])],
+    );
+    let vqa = VQA::parse(&file).unwrap();
+
+    let mut chunks = vqa.audio_chunks();
+    let mut samples = vec![7];
+    assert_eq!(chunks.next_into(&mut samples), Some(Ok(())));
+    assert_eq!(samples, [7, MONO_SAMPLES[0], MONO_SAMPLES[1]]);
+
+    let mut resumed = chunks.clone();
+    assert_eq!(chunks.next_into(&mut samples), Some(Ok(())));
+    assert_eq!(samples[1..], MONO_SAMPLES);
+    assert_eq!(resumed.next(), Some(Ok(MONO_SAMPLES[2..].to_vec())));
+    assert_eq!(chunks.next_into(&mut samples), None);
+}
+
+// ---------------------------------------------------------------------------
 // IMA ADPCM (SND2)
 //
 // ima-adpcm.txt, Optimization, "The usual algorithm" (shift-and-add), with

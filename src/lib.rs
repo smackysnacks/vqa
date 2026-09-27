@@ -50,6 +50,11 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
+//! [`VQA::decode_audio`] fails on the first malformed chunk. To play a
+//! damaged or cut-off movie as far as it goes, decode the soundtrack chunk
+//! by chunk with [`VQA::audio_chunks`], which yields the sound before the
+//! damage, and frames with [`Frames`], which stops at the first bad one.
+//!
 //! Runnable examples exercise the same API: `player` plays a movie (video
 //! in a window, soundtrack on the default audio device), `dump_frames`
 //! writes every video frame out as PPM, and `bench` times the decoder and
@@ -57,7 +62,8 @@
 //!
 //! # Layers
 //!
-//! - [`movie`]: the high-level API above ([`VQA`], [`Chunks`], [`Frames`]).
+//! - [`movie`]: the high-level API above ([`VQA`], [`Chunks`], [`Frames`],
+//!   [`AudioChunks`]).
 //! - [`parser`]: zero-copy nom parsers for the individual chunks, for
 //!   consumers that want to walk the container themselves.
 //! - [`video`]: [`FrameDecoder`], the stateful codebook/palette/frame
@@ -86,7 +92,7 @@
 #![warn(missing_docs)]
 
 pub use error::Error;
-pub use movie::{Chunks, Frames, VQA};
+pub use movie::{AudioChunks, Chunks, Frames, VQA};
 pub use parser::*;
 pub use video::{Frame, FrameDecoder, FramePixels, FramePixelsRef, FrameRef};
 

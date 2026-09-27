@@ -77,64 +77,129 @@ impl<'a> VQA<'a> {
     /// Decode the whole soundtrack into interleaved signed 16-bit samples
     /// ([`VQAHeader::num_channels`] channels at [`VQAHeader::sample_rate`]
     /// Hz), handling the per-version stereo layouts of SND2 data and raw
-    /// SND0 PCM. SND1 (Westwood ADPCM) is not supported yet.
+    /// SND0 PCM. SND1 (Westwood ADPCM) is not supported yet. Fails on the
+    /// first malformed chunk; [`VQA::audio_chunks`] keeps the sound before
+    /// it.
     pub fn decode_audio(&self) -> Result<Vec<i16>, Error> {
-        let stereo = self.header.num_channels() >= 2;
-        let mut left = CodecState::new();
-        let mut right = CodecState::new();
+        let mut chunks = self.audio_chunks();
         let mut samples = Vec::new();
-
-        for chunk in self.chunks() {
-            let chunk = chunk?;
-            match &chunk.id {
-                b"SND2" => {
-                    let data = chunk.data;
-                    if !stereo {
-                        decompress_into(&mut left, data, &mut samples);
-                    } else if self.header.version == VQAVersion::Three {
-                        // v3 splits the chunk in halves: left then right
-                        let (l, r) = data.split_at(data.len() / 2);
-                        decode_stereo(&mut left, &mut right, l.iter().zip(r), &mut samples);
-                        // an odd length leaves the right half a byte longer:
-                        // decode it to keep that predictor in step, but its
-                        // samples have no left partner and are dropped
-                        if let Some(&unpaired) = r.get(l.len()) {
-                            right.decode_byte(unpaired);
-                        }
-                    } else {
-                        // v1/v2 alternate bytes (two nibble-samples each)
-                        // between left and right
-                        let (pairs, rest) = data.as_chunks::<2>();
-                        let pairs = pairs.iter().map(|[l, r]| (l, r));
-                        decode_stereo(&mut left, &mut right, pairs, &mut samples);
-                        // likewise an odd length ends on an unpaired left byte
-                        if let [unpaired] = rest {
-                            left.decode_byte(*unpaired);
-                        }
-                    }
-                }
-                b"SND0" => {
-                    // raw PCM: signed 16-bit, or unsigned 8-bit widened
-                    if self.header.bit_depth() == 16 {
-                        samples.extend(
-                            chunk
-                                .data
-                                .as_chunks::<2>()
-                                .0
-                                .iter()
-                                .map(|&b| i16::from_le_bytes(b)),
-                        );
-                    } else {
-                        samples.extend(chunk.data.iter().map(|&b| (i16::from(b) - 128) << 8));
-                    }
-                }
-                b"SND1" => return Err(Error::UnsupportedSound("SND1 (Westwood ADPCM)")),
-                _ => {}
-            }
+        while let Some(result) = chunks.next_into(&mut samples) {
+            result?;
         }
-
         Ok(samples)
     }
+
+    /// Decode the soundtrack one sound chunk at a time: what
+    /// [`VQA::decode_audio`] returns, split into each `SND?` chunk's
+    /// samples. It yields every chunk before a malformed one, so a damaged
+    /// or cut-off movie still gives up the sound it has.
+    pub fn audio_chunks(&self) -> AudioChunks<'a> {
+        AudioChunks {
+            chunks: self.chunks(),
+            version: self.header.version,
+            stereo: self.header.num_channels() >= 2,
+            pcm16: self.header.bit_depth() == 16,
+            left: CodecState::new(),
+            right: CodecState::new(),
+            done: false,
+        }
+    }
+}
+
+/// Iterator over a movie's soundtrack, one sound chunk at a time: each item
+/// holds one `SND?` chunk's samples, interleaved signed 16-bit as
+/// [`VQA::decode_audio`] returns them. Stops after the first error.
+///
+/// Cloning saves the decoding position, IMA ADPCM predictors included.
+#[derive(Debug, Clone)]
+pub struct AudioChunks<'a> {
+    chunks: Chunks<'a>,
+    version: VQAVersion,
+    stereo: bool,
+    /// whether raw SND0 samples are 16-bit (else unsigned 8-bit)
+    pcm16: bool,
+    left: CodecState,
+    right: CodecState,
+    done: bool,
+}
+
+impl AudioChunks<'_> {
+    /// Decode the next sound chunk and append its samples to `samples`:
+    /// [`Iterator::next`] without a new buffer for every chunk.
+    pub fn next_into(&mut self, samples: &mut Vec<i16>) -> Option<Result<(), Error>> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let chunk = match self.chunks.next()? {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            };
+            match &chunk.id {
+                b"SND2" => self.decode_snd2(chunk.data, samples),
+                b"SND1" => {
+                    self.done = true;
+                    return Some(Err(Error::UnsupportedSound("SND1 (Westwood ADPCM)")));
+                }
+                // raw PCM: signed 16-bit, or unsigned 8-bit
+                b"SND0" if self.pcm16 => samples.extend(
+                    chunk
+                        .data
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|&b| i16::from_le_bytes(b)),
+                ),
+                b"SND0" => samples.extend(chunk.data.iter().map(|&b| widen(b))),
+                _ => continue,
+            }
+            return Some(Ok(()));
+        }
+    }
+
+    fn decode_snd2(&mut self, data: &[u8], samples: &mut Vec<i16>) {
+        let (left, right) = (&mut self.left, &mut self.right);
+        if !self.stereo {
+            decompress_into(left, data, samples);
+        } else if self.version == VQAVersion::Three {
+            // v3 splits the chunk in halves: left then right
+            let (l, r) = data.split_at(data.len() / 2);
+            decode_stereo(left, right, l.iter().zip(r), samples);
+            // an odd length leaves the right half a byte longer: decode it
+            // to keep that predictor in step, but its samples have no left
+            // partner and are dropped
+            if let Some(&unpaired) = r.get(l.len()) {
+                right.decode_byte(unpaired);
+            }
+        } else {
+            // v1/v2 alternate bytes (two nibble-samples each) between left
+            // and right
+            let (pairs, rest) = data.as_chunks::<2>();
+            let pairs = pairs.iter().map(|[l, r]| (l, r));
+            decode_stereo(left, right, pairs, samples);
+            // likewise an odd length ends on an unpaired left byte
+            if let [unpaired] = rest {
+                left.decode_byte(*unpaired);
+            }
+        }
+    }
+}
+
+impl Iterator for AudioChunks<'_> {
+    type Item = Result<Vec<i16>, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut samples = Vec::new();
+        Some(self.next_into(&mut samples)?.map(|()| samples))
+    }
+}
+
+/// Widen an unsigned 8-bit sample (0x80 silence) to signed 16-bit.
+fn widen(sample: u8) -> i16 {
+    (i16::from(sample) - 128) << 8
 }
 
 /// Decode stereo byte pairs straight into interleaved samples: each
