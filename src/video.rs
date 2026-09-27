@@ -259,12 +259,15 @@ impl FrameRef<'_> {
 
 /// Stateful decoder for a movie's video stream.
 ///
-/// Feed it every VQFL chunk ([`FrameDecoder::process_vqfl`]) and VQFR chunk
-/// ([`FrameDecoder::decode_frame`]) in file order; it maintains the codebook
-/// (including accumulation of partial codebooks across `cbparts` frames),
-/// the palette, and the previous frame that HiColor movies update
-/// differentially. Cloning it saves that state, e.g. to resume decoding
-/// from a checkpoint after seeking.
+/// Feed it every VQFL chunk ([`FrameDecoder::process_vqfl`]) and VQFR (or
+/// VQFK) chunk ([`FrameDecoder::decode_frame`]) in file order; it maintains
+/// the codebook (including accumulation of partial codebooks across
+/// `cbparts` frames), the palette, and the previous frame that HiColor
+/// movies update differentially. Movies with `cbparts` 0 in their header
+/// need [`FrameDecoder::swap_in_codebook_parts`] called where their CINF
+/// chunk says; [`Frames`](crate::Frames) handles that and the older layout
+/// without VQFR chunks. Cloning the decoder saves its state, e.g. to resume
+/// decoding from a checkpoint after seeking.
 #[derive(Clone)]
 pub struct FrameDecoder {
     version: VQAVersion,
@@ -373,28 +376,62 @@ impl FrameDecoder {
         while !data.is_empty() {
             let (rest, chunk) = raw_chunk(data).map_err(|_| Error::Parse)?;
             data = rest;
-            match &chunk.id {
-                b"VPT0" => self.render_vpt(chunk.data)?,
-                b"VPTZ" => {
-                    let table = lcw::decompress(chunk.data, self.pointer_table_len())?;
-                    self.render_vpt(&table)?;
-                }
-                b"VPTR" => self.render_vptr(chunk.data)?,
-                b"VPRZ" => {
-                    // a command stream has no fixed size; bound it generously
-                    let cap = self.blocks_x * self.blocks_y * 8 + 256;
-                    let stream = lcw::decompress(chunk.data, cap)?;
-                    self.render_vptr(&stream)?;
-                }
-                _ => self.side_chunk(&chunk)?,
-            }
+            self.frame_chunk(&chunk)?;
         }
+        self.end_frame()
+    }
 
+    /// Apply one of a frame's sub-chunks: draw a pointer table or stream,
+    /// or take in a codebook, codebook part, or palette.
+    pub(crate) fn frame_chunk(&mut self, chunk: &RawChunk<'_>) -> Result<(), Error> {
+        match &chunk.id {
+            b"VPT0" => self.render_vpt(chunk.data),
+            // VPTK marks a key frame and VPTD a delta one; Westwood's loader
+            // reads both like VPTZ
+            b"VPTZ" | b"VPTK" | b"VPTD" => {
+                let table = lcw::decompress(chunk.data, self.pointer_table_len())?;
+                self.render_vpt(&table)
+            }
+            b"VPTR" => self.render_vptr(chunk.data),
+            b"VPRZ" => {
+                // a command stream has no fixed size; bound it generously
+                let cap = self.blocks_x * self.blocks_y * 8 + 256;
+                let stream = lcw::decompress(chunk.data, cap)?;
+                self.render_vptr(&stream)
+            }
+            _ => self.side_chunk(chunk),
+        }
+    }
+
+    /// Finish the frame the sub-chunks drew, and borrow it.
+    pub(crate) fn end_frame(&mut self) -> Result<FrameRef<'_>, Error> {
         // a codebook completed by this frame's part takes effect only after
         // the frame is drawn
-        self.finish_codebook_parts()?;
-
+        if self.cbparts != 0 && self.parts_count >= self.cbparts {
+            self.swap_in_codebook_parts()?;
+        }
         Ok(self.frame())
+    }
+
+    /// Swap in the codebook assembled from the codebook parts (`CBP0` or
+    /// `CBPZ` chunks) staged so far. The decoder does this by itself once
+    /// the header's `cbparts` frames have each brought a part; movies whose
+    /// header gives no count (`cbparts` 0, as in Lands of Lore) list the
+    /// frames where each codebook takes over in a CINF chunk instead, and
+    /// need this called before decoding those frames.
+    /// [`Frames`](crate::Frames) does that for them.
+    pub fn swap_in_codebook_parts(&mut self) -> Result<(), Error> {
+        if self.parts_count == 0 {
+            return Ok(());
+        }
+        let staged = std::mem::take(&mut self.parts);
+        self.parts_count = 0;
+        let bytes = if self.parts_compressed {
+            lcw::decompress(&staged, self.max_codebook_bytes)?
+        } else {
+            staged
+        };
+        self.set_codebook(bytes)
     }
 
     /// Handle the non-pointer sub-chunks: codebooks, codebook parts, and
@@ -460,22 +497,6 @@ impl FrameDecoder {
         self.parts.extend_from_slice(chunk.data);
         self.parts_count += 1;
         Ok(())
-    }
-
-    /// Swap in the codebook accumulated from CBP? parts once `cbparts`
-    /// frames have contributed one part each.
-    fn finish_codebook_parts(&mut self) -> Result<(), Error> {
-        if self.cbparts == 0 || self.parts_count < self.cbparts {
-            return Ok(());
-        }
-        let staged = std::mem::take(&mut self.parts);
-        self.parts_count = 0;
-        let bytes = if self.parts_compressed {
-            lcw::decompress(&staged, self.max_codebook_bytes)?
-        } else {
-            staged
-        };
-        self.set_codebook(bytes)
     }
 
     fn set_palette(&mut self, data: &[u8]) -> Result<(), Error> {

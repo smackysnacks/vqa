@@ -476,6 +476,50 @@ fn codebook_parts_swap_in_before_the_last_parts_frame_returns() {
 }
 
 #[test]
+fn swap_in_codebook_parts_completes_the_staged_parts_on_demand() {
+    // with cbparts 0 the header gives no part count (Lands of Lore's
+    // movies schedule their codebooks in a CINF chunk instead): parts
+    // stay staged until the caller swaps them in (locks current behavior)
+    let mut decoder = FrameDecoder::new(&header_8bit()).unwrap();
+    let old: Vec<u8> = (0..32).collect();
+    let new: Vec<u8> = (100..132).collect();
+    let table = chunk(b"VPT0", &IDENTITY_TABLE);
+
+    // nothing staged: no change
+    decoder.swap_in_codebook_parts().unwrap();
+    let vqfr = [
+        chunk(b"CBF0", &old),
+        chunk(b"CBP0", &new[..7]),
+        table.clone(),
+    ]
+    .concat();
+    assert_eq!(pixels(&decoder.decode_frame(&vqfr).unwrap()), OLD_FRAME);
+    let vqfr = [chunk(b"CBP0", &new[7..]), table.clone()].concat();
+    assert_eq!(pixels(&decoder.decode_frame(&vqfr).unwrap()), OLD_FRAME);
+    assert_eq!(pixels(&decoder.decode_frame(&table).unwrap()), OLD_FRAME);
+
+    decoder.swap_in_codebook_parts().unwrap();
+    assert_eq!(pixels(&decoder.decode_frame(&table).unwrap()), NEW_FRAME);
+}
+
+#[test]
+fn vptk_and_vptd_tables_decode_like_vptz() {
+    // Westwood's VQA loader (WINVQ/VQA32/LOADER.CPP in EA's GPL Red Alert
+    // source) loads VPTK (a key frame's table) and VPTD like VPTZ
+    let book: Vec<u8> = (0..32).collect();
+    for id in [b"VPTK", b"VPTD"] {
+        let chunks = [
+            chunk(b"CBF0", &book),
+            chunk(id, &lcw_literals(&IDENTITY_TABLE)),
+        ];
+        assert_eq!(
+            pixels(&decode_one(&header_8bit(), &chunks).unwrap()),
+            OLD_FRAME
+        );
+    }
+}
+
+#[test]
 fn a_bad_joined_cbpz_stream_fails_the_frame_carrying_the_last_part() {
     // locks current behavior: the joined parts are decompressed as the frame
     // with the last part finishes (vqa.txt, CBP? chunk), so that frame

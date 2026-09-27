@@ -675,6 +675,131 @@ fn frames_of_a_movie_cut_off_mid_chunk_end_with_one_parse_error() {
     assert!(frames.next().is_none());
 }
 
+/// The frame `codebook(base)` draws under the pointer table
+/// [`TWO_ENTRY_TABLE`]: entry 0 in the left blocks, entry 1 in the right.
+fn two_entry_frame(base: u8) -> Vec<u8> {
+    let (e0, e1) = (base, base + 10);
+    let row = |r: u8| [e0 + 4 * r..e0 + 4 * r + 4, e1 + 4 * r..e1 + 4 * r + 4];
+    let block_row: Vec<u8> = (0..2).flat_map(row).flatten().collect();
+    [block_row.clone(), block_row].concat()
+}
+
+/// Blocks drawing entries 0, 1, 0, 1 (vqa.txt, VERSION 2 INDEX TABLE LAYOUT)
+const TWO_ENTRY_TABLE: [u8; 8] = [0, 1, 0, 1, /* hi */ 0, 0, 0, 0];
+
+/// The palette indices of every frame of `file`, which must all decode.
+fn all_frames(file: &[u8]) -> Vec<Vec<u8>> {
+    let vqa = VQA::parse(file).unwrap();
+    let frames = vqa.frames().unwrap();
+    frames.map(|frame| indexed(Some(frame)).0).collect()
+}
+
+/// A CINF chunk scheduling codebooks at the frames `starts`: a CINH count,
+/// then CIND entries of a start frame and a compressed size (unused here).
+fn cinf(starts: &[u16]) -> Vec<u8> {
+    let mut cinh = (starts.len() as u16).to_le_bytes().to_vec();
+    cinh.extend([0; 6]);
+    let cind: Vec<u8> = starts
+        .iter()
+        .flat_map(|&start| [start.to_le_bytes().as_slice(), &[0; 4]].concat())
+        .collect();
+    chunk(
+        b"CINF",
+        &[chunk(b"CINH", &cinh), chunk(b"CIND", &cind)].concat(),
+    )
+}
+
+#[test]
+fn frames_swap_in_codebook_parts_where_the_cinf_schedule_starts_a_codebook() {
+    // Lands of Lore's movies store cbparts 0 and send each codebook in
+    // parts over a group of frames of varying length. Their CINF chunk's
+    // CIND entries give each group's first frame (516EFA98.VQA: 0, 31, 53,
+    // ...), where the codebook the previous group's parts built takes over.
+    // No document describes CINF: this locks current behavior, found on
+    // that movie
+    let table = chunk(b"VPT0", &TWO_ENTRY_TABLE);
+    let new = codebook(20);
+    let frames = [
+        vqfr(&[
+            chunk(b"CBF0", &codebook(0)),
+            chunk(b"CBP0", &new[..5]),
+            table.clone(),
+        ]),
+        vqfr(&[chunk(b"CBP0", &new[5..]), table.clone()]),
+        vqfr(std::slice::from_ref(&table)),
+    ];
+
+    // frames 0 and 1 are one group; frame 2 starts the next
+    let scheduled = movie(&header_8bit(), &[&[cinf(&[0, 2])], &frames[..]].concat());
+    assert_eq!(
+        all_frames(&scheduled),
+        [two_entry_frame(0), two_entry_frame(0), two_entry_frame(20)]
+    );
+
+    // without a schedule the parts never complete
+    let unscheduled = movie(&header_8bit(), &frames);
+    assert_eq!(all_frames(&unscheduled), vec![two_entry_frame(0); 3]);
+}
+
+#[test]
+fn frames_decode_vqfk_key_frames_and_vptk_and_vptd_tables() {
+    // Westwood's VQA loader (WINVQ/VQA32/LOADER.CPP in EA's GPL Red Alert
+    // source) reads a VQFK chunk like a VQFR, flagging a key frame, and
+    // VPTK and VPTD pointer tables like VPTZ, LCW-compressed
+    let file = movie(
+        &header_8bit(),
+        &[
+            chunk(
+                b"VQFK",
+                &[
+                    chunk(b"CBF0", &codebook(0)),
+                    chunk(b"VPTK", &lcw_literals(&TWO_ENTRY_TABLE)),
+                ]
+                .concat(),
+            ),
+            vqfr(&[chunk(b"VPTD", &lcw_literals(&TWO_ENTRY_TABLE))]),
+        ],
+    );
+    assert_eq!(all_frames(&file), [two_entry_frame(0), two_entry_frame(0)]);
+}
+
+#[test]
+fn frames_decode_the_older_layout_without_vqfr_chunks() {
+    // LOADER.CPP reads "either the older non-frame-grouped VQA file format,
+    // or the new frame-chunk format. For the older format, it's assumed
+    // that the last chunk in a frame is the pointer data." Kyrandia 3's
+    // benchl.vqa is laid out so: CBFZ, CBPZ, CPL0 and VPTZ at the top level
+    let other_table = [1, 0, 1, 0, /* hi */ 0, 0, 0, 0];
+    let file = movie(
+        &header_8bit(),
+        &[
+            chunk(b"CBF0", &codebook(0)),
+            chunk(b"CPL0", &[0x3f, 0, 0]),
+            chunk(b"VPT0", &TWO_ENTRY_TABLE),
+            chunk(b"SND2", &[0x77]),
+            chunk(b"VPTZ", &lcw_literals(&other_table)),
+        ],
+    );
+    let vqa = VQA::parse(&file).unwrap();
+    let frames: Vec<_> = vqa.frames().unwrap().map(|f| indexed(Some(f))).collect();
+
+    // the second frame swaps the two entries' columns
+    let swapped: Vec<u8> = two_entry_frame(0)
+        .as_chunks::<4>()
+        .0
+        .chunks(2)
+        .flat_map(|pair| [pair[1], pair[0]])
+        .flatten()
+        .collect();
+    assert_eq!(
+        frames,
+        [
+            (two_entry_frame(0), vec![[0xff, 0, 0]]),
+            (swapped, vec![[0xff, 0, 0]])
+        ]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // SND0 and SND1
 

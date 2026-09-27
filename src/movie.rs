@@ -25,6 +25,9 @@ pub struct VQA<'a> {
     pub frame_index: Option<Vec<FrameInfo>>,
     /// Every chunk after the header, walked by [`VQA::chunks`]
     body: &'a [u8],
+    /// The CIND entries of the CINF chunk, the frames where each codebook
+    /// takes over; see [`Frames`]
+    codebook_schedule: &'a [u8],
 }
 
 impl<'a> VQA<'a> {
@@ -38,15 +41,25 @@ impl<'a> VQA<'a> {
             .map_err(|_| Error::Parse)?;
         let (body, header) = vqa_header(rest).map_err(|_| Error::Parse)?;
 
-        // the FINF chunk sits between the header and the first frame's data,
-        // possibly behind chunks we have no parser for (LINF, CINF, ...)
-        let frame_index = Chunks { input: body }
-            .take_while(Result::is_ok)
-            .flatten()
-            .find(|chunk| &chunk.id == b"FINF")
-            .map(|chunk| {
-                nom::multi::count(frame_info, chunk.data.len() / 4)
-                    .parse(chunk.data)
+        // the frame index (FINF) and codebook schedule (CINF) sit between
+        // the header and the first frame's data, possibly behind chunks we
+        // have no parser for (LINF, PINF, ...)
+        let mut finf = None;
+        let mut codebook_schedule: &[u8] = &[];
+        for chunk in (Chunks { input: body }).map_while(Result::ok) {
+            match &chunk.id {
+                b"CINF" => codebook_schedule = cind_entries(chunk.data),
+                b"FINF" => {
+                    finf = Some(chunk.data);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let frame_index = finf
+            .map(|data| {
+                nom::multi::count(frame_info, data.len() / 4)
+                    .parse(data)
                     .map(|(_, frames)| frames)
                     .map_err(|_| Error::Parse)
             })
@@ -57,6 +70,7 @@ impl<'a> VQA<'a> {
             header,
             frame_index,
             body,
+            codebook_schedule,
         })
     }
 
@@ -70,6 +84,14 @@ impl<'a> VQA<'a> {
         Ok(Frames {
             chunks: self.chunks(),
             decoder: FrameDecoder::new(&self.header)?,
+            // with no part count in the header, codebook parts complete
+            // where the CINF schedule starts a codebook
+            codebook_schedule: if self.header.cbparts == 0 {
+                self.codebook_schedule
+            } else {
+                &[]
+            },
+            frame: 0,
             done: false,
         })
     }
@@ -250,9 +272,11 @@ impl<'a> Iterator for Chunks<'a> {
     }
 }
 
-/// Iterator over a movie's decoded video frames. Every VQFR chunk yields one
-/// frame; VQFL codebook refreshes are applied transparently. Stops after the
-/// first error.
+/// Iterator over a movie's decoded video frames. Every VQFR chunk (or
+/// VQFK, a key frame) yields one frame, as does every pointer table of the
+/// older layout that has frame sub-chunks at the top level; VQFL codebook
+/// refreshes and the CINF codebook schedule are applied transparently.
+/// Stops after the first error.
 ///
 /// Each item is a copy of the decoder's frame. [`Frames::next_ref`] borrows
 /// it instead, and [`Iterator::nth`] skips frames without copying them.
@@ -263,48 +287,104 @@ impl<'a> Iterator for Chunks<'a> {
 pub struct Frames<'a> {
     chunks: Chunks<'a>,
     decoder: FrameDecoder,
+    /// the CIND entries not yet reached
+    codebook_schedule: &'a [u8],
+    /// the number of the next frame
+    frame: usize,
     done: bool,
+}
+
+/// One frame's data: a VQFR payload of sub-chunks, or the pointer table
+/// ending a frame of the older top-level layout.
+enum FrameData<'a> {
+    Payload(&'a [u8]),
+    Table(RawChunk<'a>),
 }
 
 impl<'a> Frames<'a> {
     /// Decode the next frame and borrow it from the decoder: [`Iterator::next`]
     /// without the copy. The frame is valid until the next call.
     pub fn next_ref(&mut self) -> Option<Result<FrameRef<'_>, Error>> {
-        match self.next_vqfr()? {
-            Ok(data) => {
-                let result = self.decoder.decode_frame_ref(data);
-                self.done = result.is_err();
-                Some(result)
-            }
-            Err(e) => Some(Err(e)),
-        }
-    }
-
-    /// Walk the chunks up to the next VQFR, applying VQFL refreshes on the
-    /// way, and return its payload.
-    fn next_vqfr(&mut self) -> Option<Result<&'a [u8], Error>> {
         if self.done {
             return None;
         }
+        let data = match self.next_frame_data()?.and_then(|data| {
+            self.start_frame()?;
+            Ok(data)
+        }) {
+            Ok(data) => data,
+            Err(e) => {
+                self.done = true;
+                return Some(Err(e));
+            }
+        };
+        let result = match data {
+            FrameData::Payload(payload) => self.decoder.decode_frame_ref(payload),
+            FrameData::Table(chunk) => self
+                .decoder
+                .frame_chunk(&chunk)
+                .and_then(|()| self.decoder.end_frame()),
+        };
+        self.done = result.is_err();
+        Some(result)
+    }
+
+    /// Walk the chunks up to the next frame, applying VQFL refreshes and
+    /// top-level codebook and palette chunks on the way.
+    fn next_frame_data(&mut self) -> Option<Result<FrameData<'a>, Error>> {
         loop {
-            match self.chunks.next()? {
-                Ok(chunk) => match &chunk.id {
-                    b"VQFL" => {
-                        if let Err(e) = self.decoder.process_vqfl(chunk.data) {
-                            self.done = true;
-                            return Some(Err(e));
-                        }
-                    }
-                    b"VQFR" => return Some(Ok(chunk.data)),
-                    _ => {}
-                },
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(e));
+            let chunk = match self.chunks.next()? {
+                Ok(chunk) => chunk,
+                Err(e) => return Some(Err(e)),
+            };
+            let applied = match &chunk.id {
+                b"VQFR" | b"VQFK" => return Some(Ok(FrameData::Payload(chunk.data))),
+                b"VQFL" => self.decoder.process_vqfl(chunk.data),
+                // the older layout, without VQFR containers: each frame's
+                // sub-chunks at the top level, ending at its pointer table
+                b"VPT0" | b"VPTZ" | b"VPTK" | b"VPTD" => {
+                    return Some(Ok(FrameData::Table(chunk)));
                 }
+                b"CBF0" | b"CBFZ" | b"CBP0" | b"CBPZ" | b"CPL0" | b"CPLZ" => {
+                    self.decoder.frame_chunk(&chunk)
+                }
+                _ => Ok(()),
+            };
+            if let Err(e) = applied {
+                return Some(Err(e));
             }
         }
     }
+
+    /// Count off the frame about to be decoded, first swapping in the
+    /// codebook parts staged so far if the CINF schedule starts a codebook
+    /// here.
+    fn start_frame(&mut self) -> Result<(), Error> {
+        let frame = self.frame;
+        self.frame += 1;
+        // each entry: the little-endian start frame, then a compressed size
+        while let Some((entry, rest)) = self.codebook_schedule.split_first_chunk::<6>() {
+            let start = usize::from(u16::from_le_bytes([entry[0], entry[1]]));
+            if start > frame {
+                break;
+            }
+            self.codebook_schedule = rest;
+            if start == frame {
+                self.decoder.swap_in_codebook_parts()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The entries of a CINF chunk's nested CIND chunk, 6 bytes each (a
+/// little-endian `u16` start frame and `u32` compressed codebook size), or
+/// none if the chunk doesn't parse.
+fn cind_entries(cinf: &[u8]) -> &[u8] {
+    let cind = (Chunks { input: cinf })
+        .map_while(Result::ok)
+        .find(|chunk| &chunk.id == b"CIND");
+    cind.map_or(&[], |chunk| chunk.data.as_chunks::<6>().0.as_flattened())
 }
 
 impl Iterator for Frames<'_> {
