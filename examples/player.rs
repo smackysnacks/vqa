@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
 
-use vqa::{FramePixelsRef, FrameRef, Frames, VQA};
+use vqa::{Frames, VQA};
 
 /// The audio side of playback: keeps the stream alive and exposes the
 /// position counter the video loop uses as its clock.
@@ -201,12 +201,16 @@ fn main() {
         while !video_done && next_frame <= target {
             checkpoints.save(next_frame, &frames);
             match frames.next_ref() {
-                Some(frame) => {
-                    let frame = frame.expect("failed to decode frame");
+                Some(Ok(frame)) => {
                     if next_frame == target {
-                        fill_buffer(frame, &mut buf);
+                        frame.write_xrgb8888(&mut buf);
                     }
                     next_frame += 1;
+                }
+                // a damaged movie plays up to the bad frame
+                Some(Err(e)) => {
+                    eprintln!("warning: video stops at frame {next_frame}: {e}");
+                    video_done = true;
                 }
                 None => video_done = true,
             }
@@ -223,26 +227,6 @@ fn main() {
             .is_none_or(|a| a.position.load(Ordering::Relaxed) >= a.total_frames);
         if video_done && audio_done {
             break;
-        }
-    }
-}
-
-/// Convert a decoded frame into minifb's 0RGB u32 pixel layout.
-fn fill_buffer(frame: FrameRef<'_>, out: &mut [u32]) {
-    match frame.pixels {
-        FramePixelsRef::Indexed { pixels, palette } => {
-            for (out, &i) in out.iter_mut().zip(pixels) {
-                let [r, g, b] = palette.get(usize::from(i)).copied().unwrap_or([0, 0, 0]);
-                *out = u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b);
-            }
-        }
-        FramePixelsRef::HiColor { pixels } => {
-            for (out, &p) in out.iter_mut().zip(pixels) {
-                // scale each 5-bit channel to 8 bits
-                let scale = |v: u32| v << 3 | v >> 2;
-                let p = u32::from(p);
-                *out = scale(p >> 10 & 31) << 16 | scale(p >> 5 & 31) << 8 | scale(p & 31);
-            }
         }
     }
 }
@@ -293,13 +277,15 @@ fn start_audio(vqa: &VQA<'_>, paused: Arc<AtomicBool>) -> Option<Audio> {
     if !vqa.header.has_sound() {
         return None;
     }
-    let samples = match vqa.decode_audio() {
-        Ok(samples) => samples,
-        Err(e) => {
-            eprintln!("warning: playing without audio: {e}");
-            return None;
+    // a damaged movie plays the sound up to the bad chunk
+    let mut samples = Vec::new();
+    let mut chunks = vqa.audio_chunks();
+    while let Some(result) = chunks.next_into(&mut samples) {
+        if let Err(e) = result {
+            eprintln!("warning: soundtrack stops early: {e}");
+            break;
         }
-    };
+    }
     if samples.is_empty() {
         return None;
     }
