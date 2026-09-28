@@ -82,12 +82,13 @@ Linux, cpal needs the ALSA headers, e.g. `libasound2-dev`).
 
 ## Testing
 
-`cargo test` runs the unit and integration tests. Retail movies from
-FFmpeg's sample archive, at least one of every version, pixel format and
-sound codec, are checked separately against pinned hashes:
+`cargo test` runs the unit and integration tests. Movies from FFmpeg's
+sample archive, at least one of every version, pixel format and sound codec
+(27 of them from Westwood's games), are checked separately against pinned
+hashes:
 
 ```sh
-just samples        # download them into samples/ (27 MB), checking md5s
+just samples        # download them into samples/ (31 MB), checking md5s
 just test-samples
 ```
 

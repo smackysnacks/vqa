@@ -119,10 +119,11 @@ pub fn form_chunk(input: &[u8]) -> IResult<&[u8], FormChunk> {
 pub enum VQAVersion {
     /// Version 1, used only in The Legend of Kyrandia III.
     One,
-    /// Version 2, used in C&C, Red Alert, Lands of Lore II, and Dune 2000.
+    /// Version 2, used in C&C, Red Alert, Lands of Lore II, Dune 2000, and
+    /// Blade Runner.
     Two,
-    /// Version 3, used in the HiColor-era games (Tiberian Sun, Lands of
-    /// Lore III, Blade Runner, Nox).
+    /// Version 3, used in the later HiColor games (Tiberian Sun, Lands of
+    /// Lore III, Nox).
     Three,
 }
 

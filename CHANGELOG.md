@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Decoding is now checked against 29 retail movies from FFmpeg's sample
-archive, which found the fixes below. Westwood ADPCM audio and three
-container variants now decode, and frames convert to 4-byte pixel formats.
+Decoding is now checked against 29 movies from FFmpeg's sample archive, 27
+of them from Westwood's games. Comparing their output with FFmpeg's and with
+Westwood's own source found several of the fixes below. Westwood ADPCM audio
+and three container variants now decode, and frames convert to 4-byte pixel
+formats.
 
 ### Added
 
@@ -32,11 +34,17 @@ container variants now decode, and frames convert to 4-byte pixel formats.
   - The older layout that has each frame's chunks at the top level instead
     of in a VQFR chunk (Kyrandia 3's `benchl.vqa`).
   - VQFK key frames, and VPTK and VPTD pointer tables.
+- `VQA::codebook_starts`, the frames where the CINF chunk starts each
+  codebook.
 
 ### Changed
 
 - `Error::UnsupportedSound` is no longer returned, now that every sound
   chunk type decodes.
+- `decode_audio` fails with `Error::TooLarge` past 2^26 samples (over 25
+  minutes of stereo sound at 22050 Hz). Westwood ADPCM expands up to
+  64-fold, so a small crafted movie could otherwise make it allocate
+  gigabytes. `audio_chunks` holds one chunk at a time and has no limit.
 
 ### Fixed
 
@@ -47,6 +55,8 @@ container variants now decode, and frames convert to 4-byte pixel formats.
 - `FrameInfo::offset` masked FINF entries with `0x3FFFFFFF`, so an entry
   with its sync flag (bit 29) or bit 28 set got a wrong offset. The top
   four bits are flags, as in Westwood's own VQA library.
+- On 32-bit targets, `FrameDecoder::new` (and so `VQA::frames`) panicked in
+  debug builds on a HiColor header with very large blocks and codebook.
 - The `player` example panicked on a frame that failed to decode, and
   played without sound if any sound chunk was malformed. It now plays a
   damaged movie as far as it goes.

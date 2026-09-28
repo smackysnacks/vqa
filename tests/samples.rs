@@ -1,4 +1,4 @@
-//! Golden tests over retail movies from FFmpeg's sample archive, listed in
+//! Golden tests over movies from FFmpeg's sample archive, listed in
 //! tests/samples.txt: every video frame and every audio sample of each,
 //! hashed. The movies aren't in the repository; download them with
 //! `just samples`, then run `just test-samples`.

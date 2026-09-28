@@ -1,6 +1,7 @@
-# Retail sample movies that tests/samples.rs checks, from the FFmpeg sample
-# archive (samples.ffmpeg.org and its FATE suite): at least one of each
-# version, pixel format, and sound codec the crate decodes. `just samples`
+# Sample movies that tests/samples.rs checks, from the FFmpeg sample archive
+# (samples.ffmpeg.org and its FATE suite): 27 from Westwood's games and 2
+# made by a community member, with at least one of each version, pixel
+# format, and sound codec the crate decodes. `just samples`
 # downloads them into samples/ and checks each md5.
 #
 # md5                             path under samples/          URL
@@ -43,7 +44,7 @@ a3c9cb53e30132c6f2cae4f42517d566  ts/small.vqa                 https://samples.f
 3f2a27997632e5814af89b4acb840eea  ts/gdilogo.vqa               https://samples.ffmpeg.org/game-formats/vqa/Tiberian%20Sun%20VQAs/gdilogo.vqa
 59d3508e373d1a599a5b8881af678be7  ts/orcas.vqa                 https://samples.ffmpeg.org/game-formats/vqa/Tiberian%20Sun%20VQAs/orcas.vqa
 
-# Blade Runner: v3, HiColor, alpha-skip commands
+# Blade Runner: v2, HiColor, alpha-skip commands
 138a70acb98b04c4fff76b359c04aff9  br/76B70801.VQA              https://samples.ffmpeg.org/game-formats/vqa/bladerunner/76B70801.VQA
 cbf118a62810f2135086c5a9568e0b15  br/A5B1D8C8.VQA              https://samples.ffmpeg.org/game-formats/vqa/bladerunner/A5B1D8C8.VQA
 e110d3681ba98e505e231c4470333be2  br/A5B1DCD2.VQA              https://samples.ffmpeg.org/game-formats/vqa/bladerunner/A5B1DCD2.VQA
