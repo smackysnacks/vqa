@@ -815,6 +815,66 @@ fn a_sub_chunk_overrunning_its_frame_is_corrupt_not_cut_off() {
 }
 
 #[test]
+fn frame_decoder_payload_walks_treat_an_overrun_as_corrupt() {
+    // a sub-chunk claiming 100 bytes with 8 there, in a payload handed over
+    // whole: the data is corrupt, not cut short
+    let mut overrun = chunk(b"VPT0", &[0; 8]);
+    overrun[4..8].copy_from_slice(&100u32.to_be_bytes());
+    let mut decoder = FrameDecoder::new(&header_8bit()).unwrap();
+    let error = decoder.decode_frame(&overrun).unwrap_err();
+    assert_eq!(
+        place(&error),
+        (ErrorKind::InvalidChunk, Some(*b"VPT0"), Some(0), None)
+    );
+    overrun[..4].copy_from_slice(b"CBF0");
+    let error = decoder.process_vqfl(&overrun).unwrap_err();
+    assert_eq!(
+        place(&error),
+        (ErrorKind::InvalidChunk, Some(*b"CBF0"), Some(0), None)
+    );
+}
+
+#[test]
+fn process_vqfl_names_the_bad_sub_chunk() {
+    // an 8-byte CBF0 takes 16 bytes, so the CPL0 after it starts at 16
+    let payload = [chunk(b"CBF0", &[0; 8]), chunk(b"CPL0", &[0; 4])].concat();
+    let mut decoder = FrameDecoder::new(&header_8bit()).unwrap();
+    let error = decoder.process_vqfl(&payload).unwrap_err();
+    let size = ErrorKind::Video(VideoError::PaletteSize);
+    assert_eq!(place(&error), (size, Some(*b"CPL0"), Some(16), None));
+}
+
+#[test]
+fn a_vqfl_sub_chunk_overrunning_it_is_corrupt_not_cut_off() {
+    // a CBFZ claiming 100 bytes inside a VQFL holding 16, before frame 1,
+    // with more of the file after it
+    let mut cbfz = chunk(b"CBFZ", &[0; 8]);
+    cbfz[4..8].copy_from_slice(&100u32.to_be_bytes());
+    let file = movie(
+        &header_8bit(),
+        &[
+            frame1_without_palette(),
+            chunk(b"VQFL", &cbfz),
+            vqfr(&[chunk(b"VPT0", &[0; 8])]),
+        ],
+    );
+    let vqa = VQA::parse(&file).unwrap();
+    let vqfl = vqa.chunks().nth(1).unwrap().unwrap();
+    let mut frames = vqa.frames().unwrap();
+    assert!(frames.next().unwrap().is_ok());
+    let error = frames.next().unwrap().unwrap_err();
+    assert_eq!(
+        place(&error),
+        (
+            ErrorKind::InvalidChunk,
+            Some(*b"CBFZ"),
+            Some(vqfl.offset + 8),
+            Some(1)
+        )
+    );
+}
+
+#[test]
 fn errors_after_a_frames_last_sub_chunk_are_placed_in_its_container() {
     // with cbparts 1, the frame's one part completes a codebook, which is
     // decompressed when the frame ends; 0x85 asks for 5 literal bytes and

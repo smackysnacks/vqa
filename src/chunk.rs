@@ -277,6 +277,19 @@ mod tests {
             failure(Chunks::new(vqfr.data)),
             (ErrorKind::Truncated, Some(*b"VPT0"), Some(0))
         );
+
+        // likewise a payload ending inside a sub-chunk's header, with or
+        // without a whole ID
+        for (payload, id) in [(&b"VPT0\x00\x00"[..], Some(*b"VPT0")), (b"VPT", None)] {
+            let mut input = b"VQFR".to_vec();
+            input.extend((payload.len() as u32).to_be_bytes());
+            input.extend(payload);
+            let vqfr = Chunks::new(&input).next().unwrap().unwrap();
+            let corrupt = (ErrorKind::InvalidChunk, id, Some(8));
+            assert_eq!(failure(vqfr.sub_chunks()), corrupt);
+            let cut = (ErrorKind::Truncated, id, Some(0));
+            assert_eq!(failure(Chunks::new(payload)), cut);
+        }
     }
 
     #[test]
