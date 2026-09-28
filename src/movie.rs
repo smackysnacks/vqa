@@ -13,6 +13,9 @@ use crate::parser::{
 };
 use crate::video::{Frame, FrameDecoder, FrameRef};
 
+/// The most samples [`VQA::decode_audio`] collects.
+const MAX_SOUNDTRACK_SAMPLES: usize = 1 << 26;
+
 /// A parsed VQA movie, borrowing the file's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VQA<'a> {
@@ -100,12 +103,23 @@ impl<'a> VQA<'a> {
     /// ([`VQAHeader::num_channels`] channels at [`VQAHeader::sample_rate`]
     /// Hz): IMA ADPCM (`SND2`) in its per-version stereo layouts, Westwood
     /// ADPCM (`SND1`), and raw PCM (`SND0`). Fails on the first malformed
-    /// chunk; [`VQA::audio_chunks`] keeps the sound before it.
+    /// chunk, where [`VQA::audio_chunks`] keeps the sound before it, and
+    /// with [`Error::TooLarge`] past 2^26 samples (over 25 minutes of stereo
+    /// sound at 22050 Hz): Westwood ADPCM can expand 64-fold, so a small
+    /// crafted file could ask for gigabytes. `audio_chunks` holds only one
+    /// chunk at a time, and has no such limit.
     pub fn decode_audio(&self) -> Result<Vec<i16>, Error> {
+        self.decode_audio_up_to(MAX_SOUNDTRACK_SAMPLES)
+    }
+
+    fn decode_audio_up_to(&self, max_samples: usize) -> Result<Vec<i16>, Error> {
         let mut chunks = self.audio_chunks();
         let mut samples = Vec::new();
         while let Some(result) = chunks.next_into(&mut samples) {
             result?;
+            if samples.len() > max_samples {
+                return Err(Error::TooLarge("soundtrack"));
+            }
         }
         Ok(samples)
     }
@@ -471,6 +485,18 @@ mod tests {
             }
         }
         samples
+    }
+
+    #[test]
+    fn decode_audio_fails_past_its_sample_cap() {
+        // three mono chunks of 3 bytes, 6 samples each
+        let file = movie(2, 1, &[vec![0x77; 3], vec![0x77; 3], vec![0x77; 3]]);
+        let vqa = VQA::parse(&file).unwrap();
+        assert_eq!(vqa.decode_audio_up_to(18).map(|s| s.len()), Ok(18));
+        assert_eq!(
+            vqa.decode_audio_up_to(17),
+            Err(Error::TooLarge("soundtrack"))
+        );
     }
 
     #[test]
