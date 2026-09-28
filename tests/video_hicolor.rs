@@ -1013,6 +1013,18 @@ fn writes_past_the_last_block_are_errors() {
     }
 }
 
+// locks current behavior: the largest header values make a decoder, on
+// 32-bit targets too - 0xff00 entries (maxblocks 0) of 255x255 pixels would
+// overflow a 32-bit usize unless the codebook cap saturates
+#[test]
+fn new_takes_the_largest_blocks_and_codebook() {
+    let header = VQAHeader {
+        maxblocks: 0,
+        ..sized(255, 255, 255, 255)
+    };
+    assert!(FrameDecoder::new(&header).is_ok());
+}
+
 // locks current behavior: HiColor frames come from VPTR/VPRZ command
 // streams (hc-vqa.txt), so an 8-bit VPT0 or VPTZ pointer table is an error
 #[test]

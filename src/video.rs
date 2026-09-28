@@ -320,7 +320,9 @@ impl FrameDecoder {
             n => usize::from(n),
         };
         let entry_bytes = block_w * block_h * if hicolor { 2 } else { 1 };
-        let max_codebook_bytes = (max_blocks * entry_bytes).min(MAX_FRAME_PIXELS);
+        // saturating: 0xff00 HiColor entries of 255x255 pixels overflow a
+        // 32-bit usize
+        let max_codebook_bytes = max_blocks.saturating_mul(entry_bytes).min(MAX_FRAME_PIXELS);
 
         Ok(FrameDecoder {
             version: header.version,
