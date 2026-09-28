@@ -877,21 +877,17 @@ fn rejects_pointer_tables_of_the_wrong_size() {
         assert_eq!(kind(decode_one(&header_8bit(), &chunks)), mismatch);
     }
 
-    // a VPTZ decompressing short fails the same way, one decompressing long
-    // hits the LCW output cap
-    let chunks = [
-        chunk(b"CBF0", &book),
-        chunk(b"VPTZ", &lcw_literals(&[0; 6])),
-    ];
-    assert_eq!(kind(decode_one(&header_8bit(), &chunks)), mismatch);
-    let chunks = [
-        chunk(b"CBF0", &book),
-        chunk(b"VPTZ", &lcw_literals(&[0; 10])),
-    ];
-    assert_eq!(
-        kind(decode_one(&header_8bit(), &chunks)),
-        Err(ErrorKind::Lcw(LcwError::TooLarge))
-    );
+    // a VPTZ, VPTK or VPTD decompressing short or long fails the same way,
+    // although one decompressing long stops at the LCW output cap
+    for id in [b"VPTZ", b"VPTK", b"VPTD"] {
+        for len in [6, 10] {
+            let chunks = [
+                chunk(b"CBF0", &book),
+                chunk(id, &lcw_literals(&[0; 32][..len])),
+            ];
+            assert_eq!(kind(decode_one(&header_8bit(), &chunks)), mismatch);
+        }
+    }
 }
 
 #[test]
@@ -1017,12 +1013,10 @@ fn rejects_palettes_of_bad_sizes() {
     let frame = decode_one(&v2, &[chunk(b"CPL0", &[0x3f; 256 * 3])]).unwrap();
     assert_eq!(indexed(&frame).1, [[0xff; 3]; 256]);
 
-    // a CPLZ expanding past 256 colors hits the LCW output cap
+    // a CPLZ expanding past 256 colors fails the same way, although it
+    // stops at the LCW output cap
     let cplz = [0xfe, 0x03, 0x03, 0x3f, 0x80]; // fill 0x303 = 257*3 bytes
-    assert_eq!(
-        kind(decode_one(&v2, &[chunk(b"CPLZ", &cplz)])),
-        Err(ErrorKind::Lcw(LcwError::TooLarge))
-    );
+    assert_eq!(kind(decode_one(&v2, &[chunk(b"CPLZ", &cplz)])), size);
 }
 
 #[test]
@@ -1048,9 +1042,11 @@ fn rejects_codebooks_larger_than_maxblocks_entries() {
         kind(decode_one(&header, &[chunk(b"CBF0", &book)])),
         Err(ErrorKind::TooLarge(Limit::Codebook))
     );
+    // compressed, it fails the same way, although it stops at the LCW
+    // output cap
     assert_eq!(
         kind(decode_one(&header, &[chunk(b"CBFZ", &lcw_literals(&book))])),
-        Err(ErrorKind::Lcw(LcwError::TooLarge))
+        Err(ErrorKind::TooLarge(Limit::Codebook))
     );
 
     // parts adding up past the cap fail as the overflowing one arrives
@@ -1062,6 +1058,23 @@ fn rejects_codebooks_larger_than_maxblocks_entries() {
     decoder.decode_frame(&chunk(b"CBP0", &book[..16])).unwrap();
     assert_eq!(
         kind(decoder.decode_frame(&chunk(b"CBP0", &book[16..]))),
+        Err(ErrorKind::TooLarge(Limit::Codebook))
+    );
+
+    // compressed parts that fit the cap but expand past it fail when the
+    // codebook they complete is swapped in: here a 5-byte LCW fill of 24
+    // bytes, in two parts
+    let fill = [0xfe, 24, 0, 7, 0x80];
+    let mut decoder = FrameDecoder::new(&header).unwrap();
+    decoder.decode_frame(&chunk(b"CBPZ", &fill[..2])).unwrap();
+    assert_eq!(
+        kind(decoder.decode_frame(&chunk(b"CBPZ", &fill[2..]))),
+        Err(ErrorKind::TooLarge(Limit::Codebook))
+    );
+    let mut decoder = FrameDecoder::new(&header).unwrap();
+    decoder.process_vqfl(&chunk(b"CBPZ", &fill)).unwrap();
+    assert_eq!(
+        kind(decoder.swap_in_codebook_parts()),
         Err(ErrorKind::TooLarge(Limit::Codebook))
     );
 }

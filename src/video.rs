@@ -10,7 +10,7 @@
 use crate::chunk::{Chunk, Chunks};
 use crate::error::{Error, ErrorKind, Limit, VideoError};
 use crate::header::{VQAHeader, VQAVersion};
-use crate::lcw;
+use crate::lcw::{self, LcwError};
 use crate::rgb;
 
 /// Sanity limit on the pixels in one frame and on codebook bytes, so a
@@ -392,9 +392,10 @@ impl FrameDecoder {
     /// - [`ErrorKind::Video`] if a palette isn't whole colors or holds more
     ///   than 256, or codebook parts mix `CBP0` and `CBPZ`
     ///
-    /// [`Error::chunk`] names the sub-chunk and [`Error::offset`] gives its
-    /// position from the start of `data`. The sub-chunks before it stay
-    /// applied.
+    /// A compressed codebook or palette fails as the uncompressed one would,
+    /// whether it expands too far or not. [`Error::chunk`] names the
+    /// sub-chunk and [`Error::offset`] gives its position from the start of
+    /// `data`. The sub-chunks before it stay applied.
     pub fn process_vqfl(&mut self, data: &[u8]) -> Result<(), Error> {
         self.apply_side_chunks(Chunks::payload(data))
     }
@@ -429,14 +430,18 @@ impl FrameDecoder {
     /// - [`ErrorKind::InvalidChunk`] if `data` doesn't split into whole
     ///   chunks
     /// - [`ErrorKind::Lcw`] if a compressed sub-chunk (`CBFZ`, `CPLZ`,
-    ///   `VPTZ`, `VPTK`, `VPTD` or `VPRZ`) isn't valid LCW data
+    ///   `VPTZ`, `VPTK`, `VPTD` or `VPRZ`) isn't valid LCW data, or a
+    ///   compressed pointer stream (`VPRZ`) expands past 8 bytes per block
     /// - [`ErrorKind::TooLarge`] ([`Limit::Codebook`]) if a codebook, or the
     ///   codebook parts staged so far, would hold more than the header's
     ///   `maxblocks` entries
     /// - [`ErrorKind::Video`] if a palette, pointer table or pointer stream
-    ///   doesn't fit the frame or the movie's pixel format, or an 8-bit
-    ///   pointer table points past the end of the codebook ([`VideoError`]
-    ///   says which)
+    ///   doesn't fit the frame or the movie's pixel format, an 8-bit pointer
+    ///   table points past the end of the codebook, or codebook parts mix
+    ///   `CBP0` and `CBPZ` ([`VideoError`] says which)
+    ///
+    /// A compressed codebook, palette or pointer table fails as the
+    /// uncompressed one would, whether it expands too far or not.
     ///
     /// [`Error::chunk`] names the sub-chunk and [`Error::offset`] gives its
     /// position from the start of `data`. Once the sub-chunks are applied,
@@ -467,7 +472,8 @@ impl FrameDecoder {
             // VPTK marks a key frame and VPTD a delta one; Westwood's loader
             // reads both like VPTZ
             b"VPTZ" | b"VPTK" | b"VPTD" => {
-                let table = lcw::decompress(chunk.data, self.pointer_table_len())?;
+                let size = ErrorKind::Video(VideoError::PointerTableSize);
+                let table = decompress(chunk.data, self.pointer_table_len(), size)?;
                 self.render_vpt(&table)
             }
             b"VPTR" => self.render_vptr(chunk.data),
@@ -504,8 +510,9 @@ impl FrameDecoder {
     ///
     /// - [`ErrorKind::Lcw`] if compressed (`CBPZ`) parts don't join into
     ///   valid LCW data
-    /// - [`ErrorKind::TooLarge`] ([`Limit::Codebook`]) if the codebook would
-    ///   hold more than the header's `maxblocks` entries
+    /// - [`ErrorKind::TooLarge`] ([`Limit::Codebook`]) if the codebook, once
+    ///   joined and decompressed, would hold more than the header's
+    ///   `maxblocks` entries
     ///
     /// The error has no location. The staged parts are used up either way.
     pub fn swap_in_codebook_parts(&mut self) -> Result<(), Error> {
@@ -519,7 +526,8 @@ impl FrameDecoder {
         let staged = std::mem::take(&mut self.parts);
         self.parts_count = 0;
         let bytes = if self.parts_compressed {
-            lcw::decompress(&staged, self.max_codebook_bytes)?
+            let too_large = ErrorKind::TooLarge(Limit::Codebook);
+            decompress(&staged, self.max_codebook_bytes, too_large)?
         } else {
             staged
         };
@@ -532,13 +540,15 @@ impl FrameDecoder {
         match &chunk.id {
             b"CBF0" => self.set_codebook(chunk.data.to_vec()),
             b"CBFZ" => {
-                let data = lcw::decompress(chunk.data, self.max_codebook_bytes)?;
+                let too_large = ErrorKind::TooLarge(Limit::Codebook);
+                let data = decompress(chunk.data, self.max_codebook_bytes, too_large)?;
                 self.set_codebook(data)
             }
             b"CBP0" | b"CBPZ" => self.stage_codebook_part(chunk),
             b"CPL0" => self.set_palette(chunk.data),
             b"CPLZ" => {
-                let data = lcw::decompress(chunk.data, 256 * 3)?;
+                let size = ErrorKind::Video(VideoError::PaletteSize);
+                let data = decompress(chunk.data, 256 * 3, size)?;
                 self.set_palette(&data)
             }
             _ => Ok(()),
@@ -838,6 +848,16 @@ impl FrameDecoder {
             },
         }
     }
+}
+
+/// Decompress LCW data whose output can't be longer than `max` bytes: more
+/// fails as `too_long`, as the same data uncompressed would, rather than as
+/// an LCW error.
+fn decompress(data: &[u8], max: usize, too_long: ErrorKind) -> Result<Vec<u8>, ErrorKind> {
+    lcw::decompress(data, max).map_err(|e| match e {
+        LcwError::TooLarge => too_long,
+        e => ErrorKind::Lcw(e),
+    })
 }
 
 #[cfg(test)]
