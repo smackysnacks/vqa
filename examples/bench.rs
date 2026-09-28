@@ -177,14 +177,15 @@ fn time(path: &str) {
         );
     }
 
-    // every compressed sub-chunk of the video stream
+    // every compressed sub-chunk of the video stream, but for codebook
+    // parts (CBPZ), which are LCW data only once joined
     let mut compressed = Vec::new();
     for chunk in vqa.chunks() {
         let chunk = chunk.expect("failed to parse chunk");
         if &chunk.id == b"VQFR" || &chunk.id == b"VQFL" {
             for sub in chunk.sub_chunks() {
                 let sub = sub.expect("failed to parse sub-chunk");
-                if sub.id[3] == b'Z' {
+                if sub.id[3] == b'Z' && &sub.id != b"CBPZ" {
                     compressed.push(sub.data);
                 }
             }
