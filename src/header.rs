@@ -34,7 +34,8 @@ impl TryFrom<u16> for VQAVersion {
     ///
     /// # Errors
     ///
-    /// Fails unless `number` is 1, 2 or 3.
+    /// [`ErrorKind::InvalidHeader`], with no location, unless `number` is 1,
+    /// 2 or 3.
     fn try_from(number: u16) -> Result<VQAVersion, Error> {
         match number {
             1 => Ok(VQAVersion::One),
@@ -63,8 +64,8 @@ pub struct VQAHeader {
     pub version: VQAVersion,
     /// Flag bits (`Flags`). Bit 0 marks a soundtrack (see [`has_sound`]),
     /// and bit 1 an alternate one, which no movie seen so far has. The
-    /// HiColor movies seen so far also set bits 2-4, whose meaning is
-    /// unknown.
+    /// HiColor movies seen so far also set some of bits 2-4 (Blade Runner's
+    /// bits 2 and 4, the others all three), whose meaning is unknown.
     ///
     /// [`has_sound`]: VQAHeader::has_sound
     pub flags: u16,
@@ -100,8 +101,11 @@ pub struct VQAHeader {
     /// Where to draw the frames (`Ypos`): the top edge, or 0xffff to center
     /// them; see [`x_pos`](VQAHeader::x_pos).
     pub y_pos: u16,
-    /// The size of the largest frame (`MaxFramesize`): bytes in 8-bit
-    /// movies, in some other unit in HiColor ones.
+    /// The size of the largest frame, in Westwood's naming (`MaxFramesize`).
+    /// What encoders store varies: v2 HiColor movies (Dune 2000, Blade
+    /// Runner) store their largest VPRZ chunk's size, while 8-bit and v3
+    /// movies store values smaller than their frame chunks, whose meaning is
+    /// unknown.
     pub max_frame_size: u16,
     /// The sound sampling rate in Hz (`SampleRate`); see
     /// [`sample_rate`](VQAHeader::sample_rate).
@@ -123,9 +127,10 @@ pub struct VQAHeader {
     /// (`AltBitsPerSample`).
     pub alt_bits: u8,
     /// Five words Westwood reserved (`FutureUse`). Later encoders use some
-    /// of them: HiColor movies store 4 in the first, and HiColor and some
-    /// Red Alert movies store the largest CBFZ chunk's size in the next
-    /// two ([`max_cbfz_size`](VQAHeader::max_cbfz_size)).
+    /// of them: HiColor movies store 4 in the first, and HiColor, Lands of
+    /// Lore and some Red Alert movies store their largest compressed
+    /// codebook's size in the next two
+    /// ([`max_cbfz_size`](VQAHeader::max_cbfz_size)).
     pub future_use: [u16; 5],
 }
 
@@ -138,8 +143,8 @@ impl VQAHeader {
     ///
     /// # Errors
     ///
-    /// Fails unless `vqhd` is exactly 42 bytes long and holds version 1, 2
-    /// or 3.
+    /// [`ErrorKind::InvalidHeader`], with no location, unless `vqhd` is
+    /// exactly 42 bytes long and holds version 1, 2 or 3.
     pub fn parse(vqhd: &[u8]) -> Result<VQAHeader, Error> {
         let vqhd: &[u8; HEADER_LEN] = vqhd
             .try_into()
@@ -196,10 +201,11 @@ impl VQAHeader {
         }
     }
 
-    /// The size of the largest CBFZ chunk, where HiColor movies (and some
-    /// Red Alert ones) store it: the second and third of the
-    /// [`future_use`](VQAHeader::future_use) words, low word first. 0 in
-    /// other movies.
+    /// The size of the movie's largest compressed codebook, a CBFZ chunk or
+    /// CBPZ parts joined, where the encoder stored it: in the second and
+    /// third [`future_use`](VQAHeader::future_use) words, low word first.
+    /// HiColor, Lands of Lore and some Red Alert movies store it; the other
+    /// movies seen so far store 0.
     pub fn max_cbfz_size(&self) -> u32 {
         u32::from(self.future_use[1]) | u32::from(self.future_use[2]) << 16
     }

@@ -56,8 +56,9 @@ output is unchanged.
 - `VQAHeader::parse` parses a VQHD payload, `FrameInfo::from_raw` a FINF
   entry, and `VQAVersion` converts to and from its number (`u16::from`,
   `VQAVersion::try_from`).
-- `VQAHeader::max_cbfz_size`, the largest CBFZ chunk's size, which HiColor
-  movies store in the header's reserved words.
+- `VQAHeader::max_cbfz_size`, the size of the largest compressed codebook,
+  which HiColor, Lands of Lore and some Red Alert movies store in the
+  header's reserved words.
 
 ### Changed
 
@@ -97,7 +98,7 @@ output is unchanged.
 
 ### Removed
 
-- **Breaking:** the `parser` module: its 14 nom parsers and the chunk
+- **Breaking:** the `parser` module: its 15 nom parsers and the chunk
   structs they returned (`SND2Chunk`, `VQFRChunk`, `CBFChunk` and so on).
   Walk chunks with `VQA::chunks`, `Chunks::new` and `Chunk::sub_chunks`,
   and match on `chunk.id`.
