@@ -58,10 +58,21 @@ impl fmt::Debug for Chunk<'_> {
 /// ([`VQA::chunks`](crate::VQA::chunks)) or the payload of a container chunk
 /// ([`Chunk::sub_chunks`]).
 ///
-/// It yields an error and then stops if the input doesn't split into whole
-/// chunks: a chunk ID that isn't four uppercase ASCII letters or digits (the
-/// walk has lost its place), or a chunk running past the end of the input.
 /// The pad byte after an odd-sized payload may be missing at the very end.
+///
+/// # Errors
+///
+/// It yields an error, and then stops, if the input doesn't split into
+/// whole chunks:
+///
+/// - [`ErrorKind::InvalidChunk`] for a chunk ID that isn't four uppercase
+///   ASCII letters or digits (the walk has lost its place), or a sub-chunk
+///   running past the end of its container's payload
+/// - [`ErrorKind::Truncated`] for a chunk running past the end of the
+///   input, which is cut short
+///
+/// [`Error::offset`] is where the bad chunk starts, and [`Error::chunk`]
+/// its ID, if all four bytes of a valid one are there.
 #[derive(Debug, Clone)]
 pub struct Chunks<'a> {
     input: &'a [u8],

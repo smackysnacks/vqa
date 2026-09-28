@@ -51,6 +51,18 @@ impl<'a> VQA<'a> {
     /// Parse the container: FORM chunk, WVQA signature, and header. The rest
     /// of the movie is walked lazily by [`VQA::chunks`], [`VQA::frames`] and
     /// [`VQA::decode_audio`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ErrorKind::NotVqa`] unless `buffer` starts with a `FORM` chunk
+    ///   header and the `WVQA` signature
+    /// - [`ErrorKind::Truncated`] if it ends before the end of the header
+    /// - [`ErrorKind::InvalidHeader`] if the `VQHD` chunk doesn't follow the
+    ///   signature, isn't 42 bytes long, or holds a version other than 1, 2
+    ///   or 3
+    ///
+    /// Errors in the header name the `VQHD` chunk at offset 12. The chunks
+    /// after it are read only as they are walked.
     pub fn parse(buffer: &'a [u8]) -> Result<VQA<'a>, Error> {
         // the FORM chunk's size is not trusted: v1 movies store less than
         // the file holds, so everything after the signature is walked
@@ -123,6 +135,16 @@ impl<'a> VQA<'a> {
     }
 
     /// Iterate over the movie's video frames, decoded in order.
+    ///
+    /// # Errors
+    ///
+    /// - [`ErrorKind::InvalidHeader`] if the header's block width or height
+    ///   is 0
+    /// - [`ErrorKind::TooLarge`] ([`Limit::FrameSize`]) if a frame would
+    ///   hold more than 2^24 pixels
+    ///
+    /// Either names the `VQHD` chunk at offset 12. The iterator reports the
+    /// errors in the frames themselves; see [`Frames`].
     pub fn frames(&self) -> Result<Frames<'a>, Error> {
         Ok(Frames {
             chunks: self.chunks(),
@@ -144,12 +166,21 @@ impl<'a> VQA<'a> {
     /// Decode the whole soundtrack into interleaved signed 16-bit samples
     /// ([`VQAHeader::num_channels`] channels at [`VQAHeader::sample_rate`]
     /// Hz): IMA ADPCM (`SND2`) in its per-version stereo layouts, Westwood
-    /// ADPCM (`SND1`), and raw PCM (`SND0`). Fails on the first malformed
-    /// chunk, where [`VQA::audio_chunks`] keeps the sound before it, and
-    /// with [`ErrorKind::TooLarge`] past 2^26 samples (over 25 minutes of stereo
-    /// sound at 22050 Hz): Westwood ADPCM can expand 64-fold, so a small
-    /// crafted file could ask for gigabytes. `audio_chunks` holds only one
-    /// chunk at a time, and has no such limit.
+    /// ADPCM (`SND1`), and raw PCM (`SND0`).
+    ///
+    /// # Errors
+    ///
+    /// - [`ErrorKind::Truncated`] or [`ErrorKind::InvalidChunk`] if the
+    ///   movie's chunks can't all be walked (see [`Chunks`]), with the bad
+    ///   chunk's offset in the file. [`VQA::audio_chunks`] keeps the sound
+    ///   before it.
+    /// - [`ErrorKind::TooLarge`] ([`Limit::Soundtrack`]) past 2^26 samples
+    ///   (over 25 minutes of stereo sound at 22050 Hz): Westwood ADPCM can
+    ///   expand 64-fold, so a small crafted file could ask for gigabytes.
+    ///   `audio_chunks` holds only one chunk at a time, and has no such
+    ///   limit.
+    ///
+    /// The sound data in a chunk always decodes.
     pub fn decode_audio(&self) -> Result<Vec<i16>, Error> {
         self.decode_audio_up_to(MAX_SOUNDTRACK_SAMPLES)
     }
@@ -201,7 +232,14 @@ impl<'a> VQA<'a> {
 
 /// Iterator over a movie's soundtrack, one sound chunk at a time: each item
 /// holds one `SND?` chunk's samples, interleaved signed 16-bit as
-/// [`VQA::decode_audio`] returns them. Stops after the first error.
+/// [`VQA::decode_audio`] returns them.
+///
+/// # Errors
+///
+/// It yields an error, and then stops, where the movie's chunks can't be
+/// walked any further ([`ErrorKind::Truncated`] or
+/// [`ErrorKind::InvalidChunk`], with the bad chunk's offset in the file). The
+/// sound data in a chunk always decodes.
 ///
 /// Cloning saves the decoding position, IMA ADPCM predictors included.
 #[derive(Debug, Clone)]
@@ -221,6 +259,10 @@ pub struct AudioChunks<'a> {
 impl AudioChunks<'_> {
     /// Decode the next sound chunk and append its samples to `samples`:
     /// [`Iterator::next`] without a new buffer for every chunk.
+    ///
+    /// # Errors
+    ///
+    /// As for the iterator; `samples` is left as it was.
     pub fn next_into(&mut self, samples: &mut Vec<i16>) -> Option<Result<(), Error>> {
         if self.done {
             return None;
@@ -320,13 +362,27 @@ fn decode_stereo<'a>(
 /// VQFK, a key frame) yields one frame, as does every pointer table of the
 /// older layout that has frame sub-chunks at the top level; VQFL codebook
 /// refreshes and the CINF codebook schedule are applied transparently.
-/// Stops after the first error.
 ///
 /// Each item is a copy of the decoder's frame. [`Frames::next_ref`] borrows
 /// it instead, and [`Iterator::nth`] skips frames without copying them.
 /// Cloning saves the decoding position: frames build on the state their
 /// predecessors left, so a clone is the way back to an earlier frame
 /// without starting over.
+///
+/// # Errors
+///
+/// It yields an error, and then stops, at the first frame that fails:
+///
+/// - [`ErrorKind::Truncated`] or [`ErrorKind::InvalidChunk`] if the movie's
+///   chunks, or a frame's sub-chunks, can't be walked (see [`Chunks`])
+/// - the errors of [`FrameDecoder::decode_frame_ref`], if the frame's data
+///   is bad, or those of [`FrameDecoder::swap_in_codebook_parts`], if the
+///   codebook the CINF chunk schedules for the frame is
+///
+/// [`Error::frame`] numbers the frame, and [`Error::chunk`] and
+/// [`Error::offset`] name the chunk, and its offset in the file, where one
+/// is known: the bad sub-chunk, or else the frame's own chunk. A scheduled
+/// codebook has no chunk of its own.
 #[derive(Clone)]
 pub struct Frames<'a> {
     chunks: Chunks<'a>,
@@ -348,6 +404,10 @@ enum FrameData<'a> {
 impl<'a> Frames<'a> {
     /// Decode the next frame and borrow it from the decoder: [`Iterator::next`]
     /// without the copy. The frame is valid until the next call.
+    ///
+    /// # Errors
+    ///
+    /// As for the iterator.
     pub fn next_ref(&mut self) -> Option<Result<FrameRef<'_>, Error>> {
         if self.done {
             return None;

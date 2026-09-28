@@ -94,6 +94,7 @@
 
 #![warn(rust_2018_idioms)]
 #![warn(missing_docs)]
+#![warn(clippy::missing_errors_doc)]
 
 pub use chunk::{Chunk, Chunks};
 pub use error::{Error, ErrorKind, Limit, VideoError};

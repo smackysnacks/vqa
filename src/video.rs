@@ -271,6 +271,14 @@ impl FrameRef<'_> {
 /// chunk says; [`Frames`](crate::Frames) handles that and the older layout
 /// without VQFR chunks. Cloning the decoder saves its state, e.g. to resume
 /// decoding from a checkpoint after seeking.
+///
+/// # Malformed data
+///
+/// A block index past the end of the codebook fails an 8-bit frame
+/// ([`VideoError::BlockIndexOutOfRange`]) but not a HiColor one, whose
+/// block keeps its pixels. Retail HiColor movies hold the occasional stray
+/// index, which the original players drew as garbage; no retail 8-bit movie
+/// does, so there it means the table was misread.
 #[derive(Clone)]
 pub struct FrameDecoder {
     version: VQAVersion,
@@ -300,8 +308,16 @@ pub struct FrameDecoder {
 }
 
 impl FrameDecoder {
-    /// Build a decoder sized from the header. Fails on a zero block size or
-    /// on frame dimensions past the sanity cap.
+    /// Build a decoder sized from the header.
+    ///
+    /// # Errors
+    ///
+    /// - [`ErrorKind::InvalidHeader`] if the header's block width or height
+    ///   is 0
+    /// - [`ErrorKind::TooLarge`] ([`Limit::FrameSize`]) if a frame would
+    ///   hold more than 2^24 pixels
+    ///
+    /// The error has no location.
     pub fn new(header: &VQAHeader) -> Result<FrameDecoder, Error> {
         let block_w = usize::from(header.block_width);
         let block_h = usize::from(header.block_height);
@@ -361,6 +377,24 @@ impl FrameDecoder {
 
     /// Process a VQFL chunk's payload: codebook (and palette) sub-chunks
     /// that apply to the following frames.
+    ///
+    /// # Errors
+    ///
+    /// Fails on the first bad sub-chunk of `data`:
+    ///
+    /// - [`ErrorKind::InvalidChunk`] if `data` doesn't split into whole
+    ///   chunks
+    /// - [`ErrorKind::Lcw`] if a compressed codebook or palette isn't valid
+    ///   LCW data
+    /// - [`ErrorKind::TooLarge`] ([`Limit::Codebook`]) if a codebook, or the
+    ///   codebook parts staged so far, would hold more than the header's
+    ///   `maxblocks` entries
+    /// - [`ErrorKind::Video`] if a palette isn't whole colors or holds more
+    ///   than 256, or codebook parts mix `CBP0` and `CBPZ`
+    ///
+    /// [`Error::chunk`] names the sub-chunk and [`Error::offset`] gives its
+    /// position from the start of `data`. The sub-chunks before it stay
+    /// applied.
     pub fn process_vqfl(&mut self, data: &[u8]) -> Result<(), Error> {
         self.apply_side_chunks(Chunks::payload(data))
     }
@@ -377,12 +411,40 @@ impl FrameDecoder {
     }
 
     /// Decode one VQFR chunk's payload into the next frame.
+    ///
+    /// # Errors
+    ///
+    /// As for [`FrameDecoder::decode_frame_ref`].
     pub fn decode_frame(&mut self, data: &[u8]) -> Result<Frame, Error> {
         Ok(self.decode_frame_ref(data)?.to_frame())
     }
 
     /// Like [`FrameDecoder::decode_frame`], but borrows the frame from the
     /// decoder instead of copying it out.
+    ///
+    /// # Errors
+    ///
+    /// Fails on the first bad sub-chunk of `data`:
+    ///
+    /// - [`ErrorKind::InvalidChunk`] if `data` doesn't split into whole
+    ///   chunks
+    /// - [`ErrorKind::Lcw`] if a compressed sub-chunk (`CBFZ`, `CPLZ`,
+    ///   `VPTZ`, `VPTK`, `VPTD` or `VPRZ`) isn't valid LCW data
+    /// - [`ErrorKind::TooLarge`] ([`Limit::Codebook`]) if a codebook, or the
+    ///   codebook parts staged so far, would hold more than the header's
+    ///   `maxblocks` entries
+    /// - [`ErrorKind::Video`] if a palette, pointer table or pointer stream
+    ///   doesn't fit the frame or the movie's pixel format, or an 8-bit
+    ///   pointer table points past the end of the codebook ([`VideoError`]
+    ///   says which)
+    ///
+    /// [`Error::chunk`] names the sub-chunk and [`Error::offset`] gives its
+    /// position from the start of `data`. Once the sub-chunks are applied,
+    /// a codebook the frame's part completes is swapped in, failing as
+    /// [`FrameDecoder::swap_in_codebook_parts`] does, with no location.
+    ///
+    /// The sub-chunks before a bad one stay applied, so the decoder is left
+    /// part-way through the frame: clone it first to be able to go back.
     pub fn decode_frame_ref(&mut self, data: &[u8]) -> Result<FrameRef<'_>, Error> {
         self.decode_chunks(Chunks::payload(data))
     }
@@ -437,6 +499,15 @@ impl FrameDecoder {
     /// ([`VQA::codebook_starts`](crate::VQA::codebook_starts)), and need
     /// this called before decoding those frames. [`Frames`](crate::Frames)
     /// does that for them.
+    ///
+    /// # Errors
+    ///
+    /// - [`ErrorKind::Lcw`] if compressed (`CBPZ`) parts don't join into
+    ///   valid LCW data
+    /// - [`ErrorKind::TooLarge`] ([`Limit::Codebook`]) if the codebook would
+    ///   hold more than the header's `maxblocks` entries
+    ///
+    /// The error has no location. The staged parts are used up either way.
     pub fn swap_in_codebook_parts(&mut self) -> Result<(), Error> {
         Ok(self.swap_parts()?)
     }

@@ -49,6 +49,13 @@ impl std::error::Error for LcwError {}
 ///
 /// `max_out` caps the output size so malformed data cannot demand unbounded
 /// allocations; pass the expected decompressed size.
+///
+/// # Errors
+///
+/// - [`LcwError::Truncated`] if the stream ends in the middle of a command
+/// - [`LcwError::BadOffset`] if a copy command reads output that hasn't
+///   been written yet
+/// - [`LcwError::TooLarge`] if the output would grow past `max_out` bytes
 pub fn decompress(src: &[u8], max_out: usize) -> Result<Vec<u8>, LcwError> {
     match src.split_first() {
         Some((0, rest)) => decompress_with(rest, Mode::Relative, max_out),
@@ -57,6 +64,10 @@ pub fn decompress(src: &[u8], max_out: usize) -> Result<Vec<u8>, LcwError> {
 }
 
 /// Decompress an LCW stream with an explicit offset [`Mode`].
+///
+/// # Errors
+///
+/// As for [`decompress`].
 pub fn decompress_with(src: &[u8], mode: Mode, max_out: usize) -> Result<Vec<u8>, LcwError> {
     let mut out = Output::new(src.len(), max_out);
     let mut sp = 0;
