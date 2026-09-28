@@ -13,6 +13,16 @@ Westwood's own source found several of the fixes below. Westwood ADPCM audio
 and three container variants now decode, and frames convert to 4-byte pixel
 formats.
 
+This release also breaks the API, once, so later releases don't have to:
+- Errors say where they happened.
+- One chunk type replaces the nom parsers, and nom is no longer a
+  dependency.
+- The header's unknown fields have Westwood's own names.
+- Each public item has one path.
+
+[Migrating from 0.6](#migrating-from-06) lists what to change. Decoding
+output is unchanged.
+
 ### Added
 
 - Westwood ADPCM (`SND1`) audio, the soundtrack codec of Kyrandia 3 and
@@ -36,15 +46,64 @@ formats.
   - VQFK key frames, and VPTK and VPTD pointer tables.
 - `VQA::codebook_starts`, the frames where the CINF chunk starts each
   codebook.
+- Where an error happened: `Error::chunk`, `Error::offset` and
+  `Error::frame` give the chunk, its byte offset, and the frame number,
+  when known, and the message includes them, e.g. `unexpected end of data
+  (frame 417, VQFR chunk at offset 0x363b92)`.
+- `Chunk::sub_chunks` walks the chunks nested in a VQFR, VQFK, VQFL or CINF
+  chunk, and `Chunks::new` any run of chunks. Each `Chunk` has the `offset`
+  of its header.
+- `VQAHeader::parse` parses a VQHD payload, `FrameInfo::from_raw` a FINF
+  entry, and `VQAVersion` converts to and from its number (`u16::from`,
+  `VQAVersion::try_from`).
+- `VQAHeader::max_cbfz_size`, the largest CBFZ chunk's size, which HiColor
+  movies store in the header's reserved words.
 
 ### Changed
 
-- `Error::UnsupportedSound` is no longer returned, now that every sound
-  chunk type decodes.
-- `decode_audio` fails with `Error::TooLarge` past 2^26 samples (over 25
+- **Breaking:** `Error` is a struct, and `Error::kind` says what went wrong.
+  The `ErrorKind` enum splits the old `Parse` into `NotVqa`,
+  `InvalidHeader`, `Truncated` (the file is cut short) and `InvalidChunk`
+  (the chunks don't line up). `TooLarge` and `Video` carry typed causes,
+  `Limit` and `VideoError`, in place of strings.
+  - `Error` is no longer `Copy`.
+  - `source()` no longer returns the LCW error, whose reason is part of the
+    message, as with `std::io::Error`.
+  - The message text has changed.
+- **Breaking:** `RawChunk` is now `Chunk`. It drops `size`, which always
+  equals `data.len()`, gains `offset`, and is `#[non_exhaustive]`.
+  `VQA::chunks` counts offsets from the start of the file.
+- **Breaking:** `VQAHeader`'s unknown fields take the names in Westwood's
+  own `VQAHeader`:
+  - `unk1` is `x_pos` and `y_pos`, where to draw the frames. Blade Runner
+    places its overlays by it.
+  - `unk2` is `max_frame_size`.
+  - `unk3` is `alt_freq`, `alt_channels` and `alt_bits`, for an alternate
+    soundtrack.
+  - `unk4`, `max_cbfz_size` and `unk5` are the reserved `future_use` words;
+    `max_cbfz_size` is now a method.
+- **Breaking:** the crate root re-exports each public item by name, and the
+  `movie`, `video`, `error` and `audio::codec` modules are private. `audio`
+  and `lcw` are the only public modules.
+- **Breaking:** `VQAVersion`'s discriminants are its version numbers, so
+  `VQAVersion::One as u16` is 1, not 0.
+- **Breaking:** `FrameInfo`, `ErrorKind` and `lcw::LcwError` are
+  `#[non_exhaustive]`.
+- `decode_audio` fails with `ErrorKind::TooLarge` past 2^26 samples (over 25
   minutes of stereo sound at 22050 Hz). Westwood ADPCM expands up to
   64-fold, so a small crafted movie could otherwise make it allocate
   gigabytes. `audio_chunks` holds one chunk at a time and has no limit.
+- Every fallible function documents its errors in an `# Errors` section.
+
+### Removed
+
+- **Breaking:** the `parser` module: its 14 nom parsers and the chunk
+  structs they returned (`SND2Chunk`, `VQFRChunk`, `CBFChunk` and so on).
+  Walk chunks with `VQA::chunks`, `Chunks::new` and `Chunk::sub_chunks`,
+  and match on `chunk.id`.
+- **Breaking:** `Error::UnsupportedSound`. Nothing returns it, now that
+  every sound chunk type decodes.
+- The `nom` dependency.
 
 ### Fixed
 
@@ -70,6 +129,29 @@ formats.
   Plain block writes copy a codebook pixel whole, that bit included, while
   the alpha-skip writes leave out the pixels that have it (Blade Runner's
   transparent ones). RGB conversion ignores it.
+- `bench time` panicked on movies with compressed codebook parts, Red
+  Alert's among them.
+
+### Migrating from 0.6
+
+| 0.6 | 0.7 |
+|---|---|
+| `use vqa::*`, `vqa::parser::X`, `vqa::movie::X`, `vqa::video::X`, `vqa::error::Error` | `vqa::X` |
+| `vqa::audio::codec::X` | `vqa::audio::X` |
+| `match e { Error::X => .. }` | `match e.kind() { ErrorKind::X => .., _ => .. }` |
+| `Error::Parse` | `ErrorKind::NotVqa`, `InvalidHeader`, `Truncated` or `InvalidChunk` |
+| `Error::Video("block size is zero")` | `ErrorKind::InvalidHeader` |
+| `Error::Video("...")` | `ErrorKind::Video(VideoError::...)` |
+| `Error::TooLarge("frame dimensions")`, `("codebook")`, `("codebook parts")`, `("soundtrack")` | `ErrorKind::TooLarge(Limit::FrameSize)`, `(Limit::Codebook)`, `(Limit::Codebook)`, `(Limit::Soundtrack)` |
+| `Error::Lcw(e)`, `e.source()` | `ErrorKind::Lcw(e)` from `e.kind()` |
+| `raw_chunk(input)` | `Chunks::new(input)`, an iterator |
+| `RawChunk { id, size, data }` | `Chunk { id, offset, data, .. }`; `size` is `data.len()` |
+| a `raw_chunk` loop over a VQFR, VQFL or CINF payload | `for sub in chunk.sub_chunks()` |
+| `snd2_chunk`, `vqfr_chunk`, `cbf_chunk` and the other typed parsers | match on `chunk.id`; the payload is `chunk.data` |
+| `form_chunk`, `vqa_header` | `VQA::parse(file)?.form_size` and `.header`, or `VQAHeader::parse(vqhd.data)` |
+| `vqa_version`, `frame_info`, `finf_chunk` | `VQAVersion::try_from`, `FrameInfo::from_raw`, `vqa.frame_index` |
+| `header.unk1`, `unk2`, `unk3` | `x_pos` and `y_pos`; `max_frame_size`; `alt_freq`, `alt_channels` and `alt_bits` |
+| `header.unk4`, `max_cbfz_size`, `unk5` | `future_use[0]`, `max_cbfz_size()`, `future_use[3..5]` |
 
 ## [0.6.0] - 2026-09-24
 
