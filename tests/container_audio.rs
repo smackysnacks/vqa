@@ -742,6 +742,41 @@ fn frames_swap_in_codebook_parts_where_the_cinf_schedule_starts_a_codebook() {
 }
 
 #[test]
+fn cinf_schedule_applies_before_a_frames_own_chunks_in_either_layout() {
+    // Westwood's loader fixes a frame's codebook before reading any of its
+    // chunks (LOADER.CPP: curframe->Codebook = loader->FullCB), so the part
+    // a group's first frame brings goes to the next codebook in the older
+    // layout too
+    let (a, b) = (codebook(20), codebook(40));
+    let table = chunk(b"VPT0", &TWO_ENTRY_TABLE);
+    let frames = [
+        vec![
+            chunk(b"CBF0", &codebook(0)),
+            chunk(b"CBP0", &a[..8]),
+            table.clone(),
+        ],
+        vec![chunk(b"CBP0", &a[8..]), table.clone()],
+        vec![chunk(b"CBP0", &b[..8]), table.clone()],
+        vec![chunk(b"CBP0", &b[8..]), table.clone()],
+        vec![table.clone()],
+    ];
+    let expected = [
+        two_entry_frame(0),
+        two_entry_frame(0),
+        two_entry_frame(20),
+        two_entry_frame(20),
+        two_entry_frame(40),
+    ];
+
+    let wrapped: Vec<Vec<u8>> = frames.iter().map(|frame| vqfr(frame)).collect();
+    let top_level: Vec<Vec<u8>> = frames.concat();
+    for chunks in [wrapped, top_level] {
+        let file = movie(&header_8bit(), &[&[cinf(&[0, 2, 4])], &chunks[..]].concat());
+        assert_eq!(all_frames(&file), expected);
+    }
+}
+
+#[test]
 fn frames_decode_vqfk_key_frames_and_vptk_and_vptd_tables() {
     // Westwood's VQA loader (WINVQ/VQA32/LOADER.CPP in EA's GPL Red Alert
     // source) reads a VQFK chunk like a VQFR, flagging a key frame, and

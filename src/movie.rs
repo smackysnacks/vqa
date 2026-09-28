@@ -322,16 +322,17 @@ impl<'a> Frames<'a> {
         if self.done {
             return None;
         }
-        let data = match self.next_frame_data()?.and_then(|data| {
-            self.start_frame()?;
-            Ok(data)
-        }) {
-            Ok(data) => data,
-            Err(e) => {
+        // a codebook the CINF schedule starts at this frame takes over
+        // before any of the frame's chunks are read, in either layout
+        let data = match self.start_frame().map(|()| self.next_frame_data()) {
+            Ok(None) => return None,
+            Ok(Some(Ok(data))) => data,
+            Ok(Some(Err(e))) | Err(e) => {
                 self.done = true;
                 return Some(Err(e));
             }
         };
+        self.frame += 1;
         let result = match data {
             FrameData::Payload(payload) => self.decoder.decode_frame_ref(payload),
             FrameData::Table(chunk) => self
@@ -370,20 +371,17 @@ impl<'a> Frames<'a> {
         }
     }
 
-    /// Count off the frame about to be decoded, first swapping in the
-    /// codebook parts staged so far if the CINF schedule starts a codebook
-    /// here.
+    /// Swap in the codebook parts staged so far if the CINF schedule starts
+    /// a codebook at the next frame.
     fn start_frame(&mut self) -> Result<(), Error> {
-        let frame = self.frame;
-        self.frame += 1;
         // each entry: the little-endian start frame, then a compressed size
         while let Some((entry, rest)) = self.codebook_schedule.split_first_chunk::<6>() {
             let start = usize::from(u16::from_le_bytes([entry[0], entry[1]]));
-            if start > frame {
+            if start > self.frame {
                 break;
             }
             self.codebook_schedule = rest;
-            if start == frame {
+            if start == self.frame {
                 self.decoder.swap_in_codebook_parts()?;
             }
         }
