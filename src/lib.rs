@@ -62,12 +62,14 @@
 //!
 //! # Layers
 //!
-//! - [`movie`]: the high-level API above ([`VQA`], [`Chunks`], [`Frames`],
-//!   [`AudioChunks`]).
-//! - [`parser`]: zero-copy nom parsers for the individual chunks, for
-//!   consumers that want to walk the container themselves.
-//! - [`video`]: [`FrameDecoder`], the stateful codebook/palette/frame
-//!   assembler driving [`Frames`].
+//! - [`VQA`] with [`Frames`] and [`AudioChunks`]: the high-level API above.
+//! - [`Chunks`]: the zero-copy chunk walk underneath, for consumers that
+//!   want to walk the container themselves. [`VQA::chunks`] walks a movie's
+//!   chunks, [`Chunk::sub_chunks`] the chunks nested in one, and
+//!   [`VQAHeader::parse`] and [`FrameInfo::from_raw`] decode the header and
+//!   the frame index.
+//! - [`FrameDecoder`]: the stateful codebook/palette/frame assembler driving
+//!   [`Frames`].
 //! - [`audio`]: the IMA ADPCM and Westwood ADPCM decoders behind `SND2` and
 //!   `SND1` sound chunks.
 //! - [`lcw`]: LCW ("Format80") decompression, used by every `*Z` chunk.
@@ -91,15 +93,17 @@
 #![warn(rust_2018_idioms)]
 #![warn(missing_docs)]
 
+pub use chunk::{Chunk, Chunks};
 pub use error::Error;
-pub use movie::{AudioChunks, Chunks, Frames, VQA};
-pub use parser::*;
+pub use header::{FrameInfo, VQAHeader, VQAVersion};
+pub use movie::{AudioChunks, Frames, VQA};
 pub use video::{Frame, FrameDecoder, FramePixels, FramePixelsRef, FrameRef};
 
 pub mod audio;
-pub mod error;
+mod chunk;
+mod error;
+mod header;
 pub mod lcw;
-pub mod movie;
-pub mod parser;
+mod movie;
 mod rgb;
-pub mod video;
+mod video;

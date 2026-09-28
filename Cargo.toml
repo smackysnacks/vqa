@@ -20,7 +20,6 @@ include = ["/src", "/examples/*.rs", "/CHANGELOG.md", "/LICENSE", "/README.md"]
 
 [dependencies]
 fearless_simd = "1.0"
-nom = "8"
 
 # for the player example; left out on wasm so the tests run there (CI runs
 # them on wasm32-wasip1 to cover a 32-bit target)

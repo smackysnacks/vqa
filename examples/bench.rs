@@ -12,7 +12,7 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use vqa::{FrameDecoder, VQA, VQAHeader, VQAVersion, lcw, raw_chunk};
+use vqa::{FrameDecoder, VQA, VQAHeader, VQAVersion, lcw};
 
 const RUNS: usize = 7;
 
@@ -182,10 +182,8 @@ fn time(path: &str) {
     for chunk in vqa.chunks() {
         let chunk = chunk.expect("failed to parse chunk");
         if &chunk.id == b"VQFR" || &chunk.id == b"VQFL" {
-            let mut data = chunk.data;
-            while !data.is_empty() {
-                let (rest, sub) = raw_chunk(data).expect("failed to parse sub-chunk");
-                data = rest;
+            for sub in chunk.sub_chunks() {
+                let sub = sub.expect("failed to parse sub-chunk");
                 if sub.id[3] == b'Z' {
                     compressed.push(sub.data);
                 }

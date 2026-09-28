@@ -53,11 +53,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For consumers that want to walk the container themselves, the `parser`
-module exposes zero-copy [nom](https://crates.io/crates/nom) parsers for
-every chunk type, with `lcw` (LCW/"Format80" decompression), `video`
-(`FrameDecoder`), and `audio` (IMA and Westwood ADPCM) as the decoding layers
-underneath. See the [API docs](https://docs.rs/vqa) for the full tour.
+For consumers that want to walk the container themselves, `Chunks` walks
+any run of chunks zero-copy, and `Chunk::sub_chunks` the chunks nested in
+one. `FrameDecoder`, `lcw` (LCW/"Format80" decompression), and `audio` (IMA
+and Westwood ADPCM) are the decoding layers underneath. See the
+[API docs](https://docs.rs/vqa) for the full tour.
 
 ## Examples
 

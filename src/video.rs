@@ -7,9 +7,10 @@
 //! block each frame from a VPT? table; HiColor movies update the previous
 //! frame differentially with a VPTR/VPRZ command stream.
 
+use crate::chunk::{Chunk, Chunks};
 use crate::error::Error;
+use crate::header::{VQAHeader, VQAVersion};
 use crate::lcw;
-use crate::parser::{RawChunk, VQAHeader, VQAVersion, raw_chunk};
 use crate::rgb;
 
 /// Sanity limit on the pixels in one frame and on codebook bytes, so a
@@ -360,11 +361,15 @@ impl FrameDecoder {
 
     /// Process a VQFL chunk's payload: codebook (and palette) sub-chunks
     /// that apply to the following frames.
-    pub fn process_vqfl(&mut self, mut data: &[u8]) -> Result<(), Error> {
-        while !data.is_empty() {
-            let (rest, chunk) = raw_chunk(data).map_err(|_| Error::Parse)?;
-            data = rest;
-            self.side_chunk(&chunk)?;
+    pub fn process_vqfl(&mut self, data: &[u8]) -> Result<(), Error> {
+        self.apply_side_chunks(Chunks::payload(data))
+    }
+
+    /// Apply the codebook and palette chunks among `chunks`, a VQFL
+    /// chunk's sub-chunks.
+    pub(crate) fn apply_side_chunks(&mut self, chunks: Chunks<'_>) -> Result<(), Error> {
+        for chunk in chunks {
+            self.side_chunk(&chunk?)?;
         }
         Ok(())
     }
@@ -376,18 +381,21 @@ impl FrameDecoder {
 
     /// Like [`FrameDecoder::decode_frame`], but borrows the frame from the
     /// decoder instead of copying it out.
-    pub fn decode_frame_ref(&mut self, mut data: &[u8]) -> Result<FrameRef<'_>, Error> {
-        while !data.is_empty() {
-            let (rest, chunk) = raw_chunk(data).map_err(|_| Error::Parse)?;
-            data = rest;
-            self.frame_chunk(&chunk)?;
+    pub fn decode_frame_ref(&mut self, data: &[u8]) -> Result<FrameRef<'_>, Error> {
+        self.decode_chunks(Chunks::payload(data))
+    }
+
+    /// Decode the next frame from `chunks`, a VQFR chunk's sub-chunks.
+    pub(crate) fn decode_chunks(&mut self, chunks: Chunks<'_>) -> Result<FrameRef<'_>, Error> {
+        for chunk in chunks {
+            self.frame_chunk(&chunk?)?;
         }
         self.end_frame()
     }
 
     /// Apply one of a frame's sub-chunks: draw a pointer table or stream,
     /// or take in a codebook, codebook part, or palette.
-    pub(crate) fn frame_chunk(&mut self, chunk: &RawChunk<'_>) -> Result<(), Error> {
+    pub(crate) fn frame_chunk(&mut self, chunk: &Chunk<'_>) -> Result<(), Error> {
         match &chunk.id {
             b"VPT0" => self.render_vpt(chunk.data),
             // VPTK marks a key frame and VPTD a delta one; Westwood's loader
@@ -441,7 +449,7 @@ impl FrameDecoder {
 
     /// Handle the non-pointer sub-chunks: codebooks, codebook parts, and
     /// palettes. Anything unrecognized is skipped.
-    fn side_chunk(&mut self, chunk: &RawChunk<'_>) -> Result<(), Error> {
+    fn side_chunk(&mut self, chunk: &Chunk<'_>) -> Result<(), Error> {
         match &chunk.id {
             b"CBF0" => self.set_codebook(chunk.data.to_vec()),
             b"CBFZ" => {
@@ -488,7 +496,7 @@ impl FrameDecoder {
         Ok(())
     }
 
-    fn stage_codebook_part(&mut self, chunk: &RawChunk<'_>) -> Result<(), Error> {
+    fn stage_codebook_part(&mut self, chunk: &Chunk<'_>) -> Result<(), Error> {
         let compressed = chunk.id[3] == b'Z';
         if self.parts_count == 0 {
             self.parts.clear();

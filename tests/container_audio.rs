@@ -14,7 +14,7 @@ use std::error::Error as StdError;
 use common::{chunk, header_8bit, header_hicolor, lcw_literals, movie, vqhd};
 use vqa::audio::{CodecState, decompress};
 use vqa::lcw::LcwError;
-use vqa::{Error, Frame, FrameInfo, FramePixels, VQA, VQAHeader, VQAVersion};
+use vqa::{Error, Frame, FramePixels, VQA, VQAHeader, VQAVersion};
 
 /// Wrap already-built chunks in `FORM` + `WVQA`, without adding a header,
 /// so tests can supply a malformed VQHD.
@@ -262,7 +262,8 @@ fn chunks_walks_every_chunk_after_the_header_in_file_order() {
     // the data; other chunks ("PINF, PINH, SN2J") can be skipped, and a
     // 0x00 byte keeps the chunk after an odd-sized one at an even offset
     // (FINF, NOTE #2). LINF and CINF are not in vqa.txt: the bundled
-    // examples/wwlogo.vqa carries them, and the RawChunk docs name them
+    // examples/wwlogo.vqa carries them. Offsets count from the start of the
+    // file, where the body starts after FORM, WVQA and the 50-byte VQHD
     let file = movie(
         &header_8bit(),
         &[
@@ -276,24 +277,27 @@ fn chunks_walks_every_chunk_after_the_header_in_file_order() {
     );
     let vqa = VQA::parse(&file).unwrap();
 
-    let chunks: Vec<([u8; 4], u32, Vec<u8>)> = vqa
+    let chunks: Vec<([u8; 4], usize, Vec<u8>)> = vqa
         .chunks()
         .map(|chunk| {
             let chunk = chunk.unwrap();
-            (chunk.id, chunk.size, chunk.data.to_vec())
+            (chunk.id, chunk.offset, chunk.data.to_vec())
         })
         .collect();
     assert_eq!(
         chunks,
         vec![
-            (*b"PINF", 2, vec![0xaa, 0xbb]),
-            (*b"LINF", 6, vec![1, 2, 3, 4, 5, 6]),
-            (*b"CINF", 3, b"abc".to_vec()),
-            (*b"FINF", 4, vec![0; 4]),
-            (*b"SND2", 1, vec![0x77]),
-            (*b"VQFR", 0, vec![]),
+            (*b"PINF", 62, vec![0xaa, 0xbb]),
+            (*b"LINF", 72, vec![1, 2, 3, 4, 5, 6]),
+            (*b"CINF", 86, b"abc".to_vec()),
+            (*b"FINF", 98, vec![0; 4]),
+            (*b"SND2", 110, vec![0x77]),
+            (*b"VQFR", 120, vec![]),
         ]
     );
+    for (id, offset, _) in &chunks {
+        assert_eq!(&file[*offset..offset + 4], id);
+    }
 }
 
 #[test]
@@ -371,19 +375,8 @@ fn frame_index_finds_finf_behind_other_chunks() {
     let vqa = VQA::parse(&file).unwrap();
 
     let index = vqa.frame_index.expect("the movie carries a FINF chunk");
-    assert_eq!(
-        index,
-        vec![
-            FrameInfo {
-                offset: 104,
-                has_palette: false
-            },
-            FrameInfo {
-                offset: 122,
-                has_palette: true
-            },
-        ]
-    );
+    let entries: Vec<_> = index.iter().map(|e| (e.offset, e.has_palette)).collect();
+    assert_eq!(entries, vec![(104, false), (122, true)]);
     for entry in &index {
         let at = entry.offset as usize;
         assert_eq!(&file[at..at + 4], b"SND2");

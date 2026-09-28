@@ -3,22 +3,40 @@
 use libfuzzer_sys::fuzz_target;
 use vqa::*;
 
+/// Walk every chunk in `chunks` and, `depth` levels down, the chunks nested
+/// in them, checking that each one's offset points at its header and
+/// payload in `input`, the bytes the walk's offsets count from.
+fn walk(input: &[u8], chunks: Chunks<'_>, depth: usize) {
+    for chunk in chunks {
+        let Ok(chunk) = chunk else {
+            return;
+        };
+        assert_eq!(&input[chunk.offset..][..4], &chunk.id);
+        assert!(chunk.id.iter().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()));
+        let size = u32::from_be_bytes(input[chunk.offset + 4..][..4].try_into().unwrap());
+        assert_eq!(size as usize, chunk.data.len());
+        assert_eq!(&input[chunk.offset + 8..][..chunk.data.len()], chunk.data);
+        if depth > 0 {
+            walk(input, chunk.sub_chunks(), depth - 1);
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
-    // Every public parser must fail cleanly on arbitrary input.
-    let _ = vqa_version(data);
-    let _ = frame_info(data);
-    let _ = snd2_chunk(data);
-    let _ = vqfr_chunk(data);
-    let _ = cbf_chunk(data);
-    let _ = vqa_header(data);
-    let _ = finf_chunk(data);
-    let _ = raw_chunk(data);
-    let _ = cbp_chunk(data);
-    let _ = cpl_chunk(data);
-    let _ = vpt_chunk(data);
-    let _ = vptr_chunk(data);
-    let _ = vqfl_chunk(data);
-    let _ = sn2j_chunk(data);
+    // The standalone parsers must fail cleanly on arbitrary input, and the
+    // chunk walk must describe the input faithfully.
+    let _ = VQAHeader::parse(data);
+    if let Some(&[a, b]) = data.first_chunk() {
+        let number = u16::from_le_bytes([a, b]);
+        if let Ok(version) = VQAVersion::try_from(number) {
+            assert_eq!(u16::from(version), number);
+        }
+    }
+    for &entry in data.as_chunks::<4>().0 {
+        let info = FrameInfo::from_raw(u32::from_le_bytes(entry));
+        assert_eq!(info.offset % 2, 0);
+    }
+    walk(data, Chunks::new(data), 2);
 
     // The high-level API must also hold up: parse, decode a bounded number
     // of video frames and convert them to RGB, and decode the soundtrack.
@@ -55,29 +73,17 @@ fuzz_target!(|data: &[u8]| {
         let _ = vqa.decode_audio();
     }
 
-    // Walk the container the way a real consumer does: FORM header, VQA
-    // header, then FINF (scanning past any LINF/CINF chunks before it), and
-    // finally the frame data each decoded FINF offset points at.
-    let Ok((rest, _)) = form_chunk(data) else {
+    // Walk the movie the way a real consumer does: its chunks and their
+    // sub-chunks, with offsets counted from the start of the file, then the
+    // chunk each decoded FINF offset points at.
+    let Ok(vqa) = VQA::parse(data) else {
         return;
     };
-    let Ok((rest, _)) = vqa_header(rest) else {
-        return;
-    };
-
-    let Some(finf_pos) = rest.windows(4).position(|w| w == b"FINF") else {
-        return;
-    };
-    let Ok((_, finf)) = finf_chunk(&rest[finf_pos..]) else {
-        return;
-    };
-
-    for frame in finf.frames {
+    walk(data, vqa.chunks(), 2);
+    for frame in vqa.frame_index.iter().flatten() {
         let Some(frame_data) = data.get(frame.offset as usize..) else {
             continue;
         };
-        let _ = snd2_chunk(frame_data);
-        let _ = vqfr_chunk(frame_data);
-        let _ = cbf_chunk(frame_data);
+        walk(frame_data, Chunks::new(frame_data), 1);
     }
 });
