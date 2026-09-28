@@ -170,6 +170,24 @@ mod tests {
     }
 
     #[test]
+    fn decompress_into_appends_and_cuts_off_relative_to_its_start() {
+        let mut samples = vec![9, 9];
+        decompress_into(&chunk(3, 2, &[0x00, 0xff]), &mut samples);
+        assert_eq!(samples, [9, 9, 0x81, 0x82, 0x83]);
+        decompress_into(&chunk(2, 2, &[7, 8]), &mut samples);
+        assert_eq!(samples, [9, 9, 0x81, 0x82, 0x83, 7, 8]);
+    }
+
+    #[test]
+    fn every_command_missing_its_data_ends_the_chunk() {
+        // a 2-bit group, a 4-bit group, and a raw run each short of data;
+        // the samples before them stay
+        assert_eq!(decompress(&chunk(5, 3, &[0xa1, 0x01, 0xff])), [0x81]);
+        assert_eq!(decompress(&chunk(5, 3, &[0xa1, 0x41, 0x12])), [0x81]);
+        assert_eq!(decompress(&chunk(5, 3, &[0xa1, 0x82, 1, 2])), [0x81]);
+    }
+
+    #[test]
     fn cuts_off_at_the_output_size_and_stops_at_the_end_of_the_data() {
         // a 2-bit group of 4 samples cut to the 3 the header asks for
         assert_eq!(decompress(&chunk(3, 2, &[0x00, 0xff])), [0x81, 0x82, 0x83]);

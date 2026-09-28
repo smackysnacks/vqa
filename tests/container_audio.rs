@@ -777,6 +777,36 @@ fn cinf_schedule_applies_before_a_frames_own_chunks_in_either_layout() {
 }
 
 #[test]
+fn frames_ignore_the_cinf_schedule_when_the_header_counts_parts() {
+    // locks current behavior: with cbparts in the header, parts complete by
+    // count (vqa.txt, CBP? chunk). Were the schedule's frame 1 honored, its
+    // swap would take in half a codebook, and frame 1 would fail
+    let header = VQAHeader {
+        cbparts: 2,
+        ..header_8bit()
+    };
+    let new = codebook(20);
+    let table = chunk(b"VPT0", &TWO_ENTRY_TABLE);
+    let file = movie(
+        &header,
+        &[
+            cinf(&[0, 1]),
+            vqfr(&[
+                chunk(b"CBF0", &codebook(0)),
+                chunk(b"CBP0", &new[..8]),
+                table.clone(),
+            ]),
+            vqfr(&[chunk(b"CBP0", &new[8..]), table.clone()]),
+            vqfr(&[table]),
+        ],
+    );
+    assert_eq!(
+        all_frames(&file),
+        [two_entry_frame(0), two_entry_frame(0), two_entry_frame(20)]
+    );
+}
+
+#[test]
 fn codebook_starts_lists_the_cind_start_frames() {
     // the CIND entries' start frames, in file order (516EFA98.VQA: 0, 31,
     // 53, ...); none without a CINF chunk or with one that doesn't parse
@@ -845,6 +875,41 @@ fn frames_decode_the_older_layout_without_vqfr_chunks() {
         [
             (two_entry_frame(0), vec![[0xff, 0, 0]]),
             (swapped, vec![[0xff, 0, 0]])
+        ]
+    );
+}
+
+#[test]
+fn frames_apply_top_level_parts_palettes_and_key_tables_in_the_older_layout() {
+    // LOADER.CPP reads the older layout's top-level CBP0/CBPZ and CPL0/CPLZ
+    // chunks as it does inside a VQFR, and ends a frame at VPTK or VPTD as
+    // at VPT0 or VPTZ
+    let header = VQAHeader {
+        cbparts: 2,
+        ..header_8bit()
+    };
+    let new = codebook(20);
+    let file = movie(
+        &header,
+        &[
+            chunk(b"CBF0", &codebook(0)),
+            chunk(b"CPLZ", &lcw_literals(&[0x3f, 0, 0])),
+            chunk(b"CBP0", &new[..8]),
+            chunk(b"VPTK", &lcw_literals(&TWO_ENTRY_TABLE)),
+            chunk(b"CBP0", &new[8..]),
+            chunk(b"VPTD", &lcw_literals(&TWO_ENTRY_TABLE)),
+            chunk(b"VPT0", &TWO_ENTRY_TABLE),
+        ],
+    );
+    let vqa = VQA::parse(&file).unwrap();
+    let frames: Vec<_> = vqa.frames().unwrap().map(|f| indexed(Some(f))).collect();
+    let red = vec![[0xff, 0, 0]];
+    assert_eq!(
+        frames,
+        [
+            (two_entry_frame(0), red.clone()),
+            (two_entry_frame(0), red.clone()),
+            (two_entry_frame(20), red)
         ]
     );
 }
