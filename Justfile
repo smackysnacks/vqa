@@ -80,6 +80,44 @@ samples:
 test-samples *args:
     cargo test --release --test samples -- --ignored "$@"
 
+# Run the bench example: `just bench <time|hash> <native|generic|wasm|wasm-simd> [file...]`,
+# over every sample movie and wwlogo.vqa when no file is given. `generic` builds for
+# baseline x86-64 in target/x86-64, as crates.io users get it; `wasm` runs wasm32-wasip1
+# under Node's WASI, and `wasm-simd` adds simd128 (in target/wasm-simd128)
+bench cmd="time" target="native" *files:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    files=("${@:3}")
+    if [ ${#files[@]} -eq 0 ]; then
+        files=($(grep -v '^#' tests/samples.txt | awk 'NF { print "samples/" $2 }') examples/wwlogo.vqa)
+    fi
+    case "$2" in
+        native)
+            cargo build -q --release --example bench
+            ./target/release/examples/bench "$1" "${files[@]}" ;;
+        generic)
+            RUSTFLAGS="-C target-cpu=x86-64" cargo build -q --release --example bench --target-dir target/x86-64
+            ./target/x86-64/release/examples/bench "$1" "${files[@]}" ;;
+        wasm | wasm-simd)
+            dir=target
+            if [ "$2" = wasm-simd ]; then
+                dir=target/wasm-simd128
+                export RUSTFLAGS="-C target-feature=+simd128"
+            fi
+            cargo build -q --release --example bench --target wasm32-wasip1 --target-dir "$dir"
+            node --no-warnings --input-type=module -e '
+                import { readFile } from "node:fs/promises";
+                import { WASI } from "node:wasi";
+                const [wasm, ...args] = process.argv.slice(1);
+                const wasi = new WASI({ version: "preview1", args: [wasm, ...args], preopens: { ".": "." } });
+                const module = await WebAssembly.compile(await readFile(wasm));
+                wasi.start(await WebAssembly.instantiate(module, wasi.getImportObject()));
+            ' "$dir/wasm32-wasip1/release/examples/bench.wasm" "$1" "${files[@]}" ;;
+        *)
+            echo "unknown target $2: use native, generic, wasm or wasm-simd" >&2
+            exit 1 ;;
+    esac
+
 # Scan Cargo.lock for known vulnerabilities in dependencies
 audit:
     #!/usr/bin/env bash
