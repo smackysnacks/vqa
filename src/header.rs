@@ -47,59 +47,86 @@ impl TryFrom<u16> for VQAVersion {
 
 /// The fixed 42-byte `VQHD` header describing the whole movie.
 ///
-/// v1 movies leave several sound fields zeroed; the [`sample_rate`],
-/// [`num_channels`], and [`bit_depth`] helpers apply the documented
-/// fallbacks, so prefer them over reading `freq`, `channels`, and `bits`
-/// directly.
+/// The fields follow Westwood's own `VQAHeader` (`VQAFILE.H` in the VQA
+/// library in EA's GPL release of the Red Alert source), named in
+/// parentheses below, and hold the values as stored. v1 movies leave
+/// several sound fields zeroed; the [`sample_rate`], [`num_channels`], and
+/// [`bit_depth`] helpers apply the documented fallbacks, so prefer them over
+/// reading `freq`, `channels`, and `bits` directly.
 ///
 /// [`sample_rate`]: VQAHeader::sample_rate
 /// [`num_channels`]: VQAHeader::num_channels
 /// [`bit_depth`]: VQAHeader::bit_depth
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VQAHeader {
-    /// VQA version number
+    /// The format version (`Version`).
     pub version: VQAVersion,
-    /// Flag bits. Bit 0 marks a soundtrack (see [`has_sound`]); the HiColor
-    /// movies seen so far also set bits 2-4, whose meaning is unknown.
+    /// Flag bits (`Flags`). Bit 0 marks a soundtrack (see [`has_sound`]),
+    /// and bit 1 an alternate one, which no movie seen so far has. The
+    /// HiColor movies seen so far also set bits 2-4, whose meaning is
+    /// unknown.
     ///
     /// [`has_sound`]: VQAHeader::has_sound
     pub flags: u16,
-    /// Number of frames
+    /// The number of frames (`Frames`).
     pub num_frames: u16,
-    /// Movie width (pixels)
+    /// The movie's width in pixels (`ImageWidth`).
     pub width: u16,
-    /// Movie height (pixels)
+    /// The movie's height in pixels (`ImageHeight`).
     pub height: u16,
-    /// Width of each image block (pixels)
+    /// The width of each image block in pixels (`BlockWidth`).
     pub block_width: u8,
-    /// Height of each image block (pixels)
+    /// The height of each image block in pixels (`BlockHeight`).
     pub block_height: u8,
-    /// Frame rate of the VQA
+    /// Frames per second (`FPS`).
     pub frame_rate: u8,
-    /// How many images use the same lookup table
+    /// Frames per codebook (`Groupsize`): how many frames each bring a part
+    /// of the next codebook. 0 in movies whose codebooks come whole, and in
+    /// those whose CINF chunk schedules them
+    /// ([`VQA::codebook_starts`](crate::VQA::codebook_starts)).
     pub cbparts: u8,
-    /// Max number of colors used in VQA
+    /// The number of colors solid-color blocks use (`Num1Colors`); 0 in
+    /// HiColor movies (see [`is_hicolor`]).
+    ///
+    /// [`is_hicolor`]: VQAHeader::is_hicolor
     pub colors: u16,
-    /// Max number of image blocks
+    /// The number of codebook entries (`CBentries`), the most a codebook
+    /// holds; the decoder takes 0 to mean 0xff00.
     pub maxblocks: u16,
-    /// Always 0?
-    pub unk1: u32,
-    /// Some kind of size?
-    pub unk2: u16,
-    /// Sound sampling frequency
+    /// Where to draw the frames (`Xpos`): the left edge, or 0xffff
+    /// (Westwood's -1) to center them. 0 in every movie seen so far except
+    /// Blade Runner's overlays, which the game places by it.
+    pub x_pos: u16,
+    /// Where to draw the frames (`Ypos`): the top edge, or 0xffff to center
+    /// them; see [`x_pos`](VQAHeader::x_pos).
+    pub y_pos: u16,
+    /// The size of the largest frame (`MaxFramesize`): bytes in 8-bit
+    /// movies, in some other unit in HiColor ones.
+    pub max_frame_size: u16,
+    /// The sound sampling rate in Hz (`SampleRate`); see
+    /// [`sample_rate`](VQAHeader::sample_rate).
     pub freq: u16,
-    /// Number of sound channels
+    /// The number of sound channels (`Channels`); see
+    /// [`num_channels`](VQAHeader::num_channels).
     pub channels: u8,
-    /// Sound resolution
+    /// The sound resolution in bits (`BitsPerSample`); see
+    /// [`bit_depth`](VQAHeader::bit_depth).
     pub bits: u8,
-    /// Always 0?
-    pub unk3: u32,
-    /// 0 in old VQAs, 4 in HiColor VQAs?
-    pub unk4: u16,
-    /// 0 in old VQAs, CBFZ size in HiColor
-    pub max_cbfz_size: u32,
-    /// Always 0?
-    pub unk5: u32,
+    /// The alternate soundtrack's sampling rate in Hz (`AltSampleRate`).
+    /// Westwood's player could switch to an alternate soundtrack, carried
+    /// in SNA? chunks, which this crate doesn't decode; the alternate
+    /// fields are 0 in every movie seen so far.
+    pub alt_freq: u16,
+    /// The alternate soundtrack's channels (`AltChannels`).
+    pub alt_channels: u8,
+    /// The alternate soundtrack's sound resolution in bits
+    /// (`AltBitsPerSample`).
+    pub alt_bits: u8,
+    /// Five words Westwood reserved (`FutureUse`). Later encoders use some
+    /// of them: HiColor movies store 4 in the first, and HiColor and some
+    /// Red Alert movies store the largest CBFZ chunk's size in the next
+    /// two ([`max_cbfz_size`](VQAHeader::max_cbfz_size)).
+    pub future_use: [u16; 5],
 }
 
 /// The size of the `VQHD` payload.
@@ -118,8 +145,6 @@ impl VQAHeader {
             .try_into()
             .map_err(|_| Error::from(ErrorKind::InvalidHeader))?;
         let u16_at = |at: usize| u16::from_le_bytes([vqhd[at], vqhd[at + 1]]);
-        let u32_at =
-            |at: usize| u32::from_le_bytes(vqhd[at..at + 4].try_into().expect("four bytes"));
 
         Ok(VQAHeader {
             version: VQAVersion::try_from(u16_at(0))?,
@@ -133,15 +158,16 @@ impl VQAHeader {
             cbparts: vqhd[13],
             colors: u16_at(14),
             maxblocks: u16_at(16),
-            unk1: u32_at(18),
-            unk2: u16_at(22),
+            x_pos: u16_at(18),
+            y_pos: u16_at(20),
+            max_frame_size: u16_at(22),
             freq: u16_at(24),
             channels: vqhd[26],
             bits: vqhd[27],
-            unk3: u32_at(28),
-            unk4: u16_at(32),
-            max_cbfz_size: u32_at(34),
-            unk5: u32_at(38),
+            alt_freq: u16_at(28),
+            alt_channels: vqhd[30],
+            alt_bits: vqhd[31],
+            future_use: [32, 34, 36, 38, 40].map(u16_at),
         })
     }
 
@@ -168,6 +194,14 @@ impl VQAHeader {
             0 => 8,
             bits => bits,
         }
+    }
+
+    /// The size of the largest CBFZ chunk, where HiColor movies (and some
+    /// Red Alert ones) store it: the second and third of the
+    /// [`future_use`](VQAHeader::future_use) words, low word first. 0 in
+    /// other movies.
+    pub fn max_cbfz_size(&self) -> u32 {
+        u32::from(self.future_use[1]) | u32::from(self.future_use[2]) << 16
     }
 
     /// Whether the movie carries a soundtrack (bit 0 of `flags`).

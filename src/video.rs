@@ -789,15 +789,16 @@ mod tests {
             cbparts: 0,
             colors: 256,
             maxblocks: 0x0f00,
-            unk1: 0,
-            unk2: 0,
+            x_pos: 0,
+            y_pos: 0,
+            max_frame_size: 0,
             freq: 22050,
             channels: 1,
             bits: 16,
-            unk3: 0,
-            unk4: 0,
-            max_cbfz_size: 0,
-            unk5: 0,
+            alt_freq: 0,
+            alt_channels: 0,
+            alt_bits: 0,
+            future_use: [0; 5],
         }
     }
 

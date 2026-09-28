@@ -51,7 +51,9 @@ fn decode_audio(file: &[u8]) -> Result<Vec<i16>, Error> {
 #[test]
 fn parses_every_vqhd_field_in_documented_order() {
     // vqa.txt, VQHD chunk: the struct VQAHeader field order, 42 bytes, in
-    // the "usual Intel" byte order (only chunk sizes are Motorola)
+    // the "usual Intel" byte order (only chunk sizes are Motorola). The
+    // fields vqa.txt calls unknown take their names and sizes from
+    // Westwood's own VQAHeader (VQAFILE.H)
     #[rustfmt::skip]
     let payload = [
         0x02, 0x00,             // Version 2
@@ -62,14 +64,15 @@ fn parses_every_vqhd_field_in_documented_order() {
         0x04, 0x02, 0x0f, 0x08, // BlockW, BlockH, FrameRate, CBParts
         0x00, 0x01,             // Colors 256
         0x00, 0x0f,             // MaxBlocks 0x0f00
-        0x01, 0x02, 0x03, 0x04, // Unknown1
-        0x05, 0x06,             // Unknown2
+        0x01, 0x02, 0x03, 0x04, // Unknown1: Xpos, Ypos
+        0x05, 0x06,             // Unknown2: MaxFramesize
         0x22, 0x56,             // Freq 22050
         0x01, 0x10,             // Channels 1, Bits 16
-        0x07, 0x08, 0x09, 0x0a, // Unknown3
-        0x0b, 0x0c,             // Unknown4
-        0x0d, 0x0e, 0x0f, 0x10, // MaxCBFZSize
-        0x11, 0x12, 0x13, 0x14, // Unknown5
+        0x07, 0x08, 0x09, 0x0a, // Unknown3: AltSampleRate, AltChannels,
+                                // AltBitsPerSample
+        0x0b, 0x0c,             // Unknown4: FutureUse[0]
+        0x0d, 0x0e, 0x0f, 0x10, // MaxCBFZSize: FutureUse[1..3]
+        0x11, 0x12, 0x13, 0x14, // Unknown5: FutureUse[3..5]
     ];
     let file = form(&[chunk(b"VQHD", &payload)]);
     let vqa = VQA::parse(&file).unwrap();
@@ -88,17 +91,19 @@ fn parses_every_vqhd_field_in_documented_order() {
             cbparts: 8,
             colors: 256,
             maxblocks: 0x0f00,
-            unk1: 0x0403_0201,
-            unk2: 0x0605,
+            x_pos: 0x0201,
+            y_pos: 0x0403,
+            max_frame_size: 0x0605,
             freq: 22050,
             channels: 1,
             bits: 16,
-            unk3: 0x0a09_0807,
-            unk4: 0x0c0b,
-            max_cbfz_size: 0x100f_0e0d,
-            unk5: 0x1413_1211,
+            alt_freq: 0x0807,
+            alt_channels: 0x09,
+            alt_bits: 0x0a,
+            future_use: [0x0c0b, 0x0e0d, 0x100f, 0x1211, 0x1413],
         }
     );
+    assert_eq!(vqa.header.max_cbfz_size(), 0x100f_0e0d);
     // vqa.txt, FORM chunk: v2/v3 store the file size minus the 8-byte
     // chunk header
     assert_eq!(vqa.form_size as usize, file.len() - 8);

@@ -473,10 +473,10 @@ mod tests {
         header.extend([4, 2, 15, 0]); // block size, frame rate, cbparts
         header.extend(256u16.to_le_bytes()); // colors
         header.extend(0u16.to_le_bytes()); // maxblocks
-        header.extend([0; 6]); // unk1, unk2
+        header.extend([0; 6]); // x_pos, y_pos, max_frame_size
         header.extend(22050u16.to_le_bytes());
         header.extend([channels, 16]);
-        header.extend([0; 14]); // unk3, unk4, max_cbfz_size, unk5
+        header.extend([0; 14]); // alt_freq, alt_channels, alt_bits, future_use
         assert_eq!(header.len(), 42);
 
         let mut body = b"WVQA".to_vec();

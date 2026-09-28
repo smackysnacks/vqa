@@ -45,15 +45,16 @@ pub fn header_8bit() -> VQAHeader {
         cbparts: 0,
         colors: 256,
         maxblocks: 0x0f00,
-        unk1: 0,
-        unk2: 0,
+        x_pos: 0,
+        y_pos: 0,
+        max_frame_size: 0,
         freq: 22050,
         channels: 1,
         bits: 16,
-        unk3: 0,
-        unk4: 0,
-        max_cbfz_size: 0,
-        unk5: 0,
+        alt_freq: 0,
+        alt_channels: 0,
+        alt_bits: 0,
+        future_use: [0; 5],
     }
 }
 
@@ -70,13 +71,8 @@ pub fn header_hicolor() -> VQAHeader {
 
 /// Serialize `header` as the 42-byte VQHD payload.
 pub fn vqhd(header: &VQAHeader) -> Vec<u8> {
-    let version: u16 = match header.version {
-        VQAVersion::One => 1,
-        VQAVersion::Two => 2,
-        VQAVersion::Three => 3,
-    };
     let mut out = Vec::new();
-    out.extend(version.to_le_bytes());
+    out.extend(u16::from(header.version).to_le_bytes());
     out.extend(header.flags.to_le_bytes());
     out.extend(header.num_frames.to_le_bytes());
     out.extend(header.width.to_le_bytes());
@@ -89,14 +85,16 @@ pub fn vqhd(header: &VQAHeader) -> Vec<u8> {
     ]);
     out.extend(header.colors.to_le_bytes());
     out.extend(header.maxblocks.to_le_bytes());
-    out.extend(header.unk1.to_le_bytes());
-    out.extend(header.unk2.to_le_bytes());
+    out.extend(header.x_pos.to_le_bytes());
+    out.extend(header.y_pos.to_le_bytes());
+    out.extend(header.max_frame_size.to_le_bytes());
     out.extend(header.freq.to_le_bytes());
     out.extend([header.channels, header.bits]);
-    out.extend(header.unk3.to_le_bytes());
-    out.extend(header.unk4.to_le_bytes());
-    out.extend(header.max_cbfz_size.to_le_bytes());
-    out.extend(header.unk5.to_le_bytes());
+    out.extend(header.alt_freq.to_le_bytes());
+    out.extend([header.alt_channels, header.alt_bits]);
+    for word in header.future_use {
+        out.extend(word.to_le_bytes());
+    }
     assert_eq!(out.len(), 42);
     out
 }
