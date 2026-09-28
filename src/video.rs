@@ -421,9 +421,10 @@ impl FrameDecoder {
     /// `CBPZ` chunks) staged so far. The decoder does this by itself once
     /// the header's `cbparts` frames have each brought a part; movies whose
     /// header gives no count (`cbparts` 0, as in Lands of Lore) list the
-    /// frames where each codebook takes over in a CINF chunk instead, and
-    /// need this called before decoding those frames.
-    /// [`Frames`](crate::Frames) does that for them.
+    /// frames where each codebook takes over in a CINF chunk instead
+    /// ([`VQA::codebook_starts`](crate::VQA::codebook_starts)), and need
+    /// this called before decoding those frames. [`Frames`](crate::Frames)
+    /// does that for them.
     pub fn swap_in_codebook_parts(&mut self) -> Result<(), Error> {
         if self.parts_count == 0 {
             return Ok(());

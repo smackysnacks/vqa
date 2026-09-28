@@ -124,6 +124,21 @@ impl<'a> VQA<'a> {
         Ok(samples)
     }
 
+    /// The frames where a new codebook takes over, as the movie's CINF
+    /// chunk schedules them (its CIND entries), in file order; none without
+    /// one. [`Frames`] follows them for movies whose header gives no
+    /// codebook part count (`cbparts` 0). Callers driving a
+    /// [`FrameDecoder`] themselves call
+    /// [`FrameDecoder::swap_in_codebook_parts`] before decoding each of
+    /// these frames.
+    pub fn codebook_starts(&self) -> impl Iterator<Item = u16> + 'a {
+        self.codebook_schedule
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|entry| u16::from_le_bytes([entry[0], entry[1]]))
+    }
+
     /// Decode the soundtrack one sound chunk at a time: what
     /// [`VQA::decode_audio`] returns, split into each `SND?` chunk's
     /// samples. It yields every chunk before a malformed one, so a damaged

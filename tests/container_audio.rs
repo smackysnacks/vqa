@@ -777,6 +777,20 @@ fn cinf_schedule_applies_before_a_frames_own_chunks_in_either_layout() {
 }
 
 #[test]
+fn codebook_starts_lists_the_cind_start_frames() {
+    // the CIND entries' start frames, in file order (516EFA98.VQA: 0, 31,
+    // 53, ...); none without a CINF chunk or with one that doesn't parse
+    let file = movie(&header_8bit(), &[cinf(&[0, 31, 53])]);
+    let vqa = VQA::parse(&file).unwrap();
+    assert_eq!(vqa.codebook_starts().collect::<Vec<_>>(), [0, 31, 53]);
+
+    let file = movie(&header_8bit(), &[]);
+    assert_eq!(VQA::parse(&file).unwrap().codebook_starts().count(), 0);
+    let file = movie(&header_8bit(), &[chunk(b"CINF", b"abc")]);
+    assert_eq!(VQA::parse(&file).unwrap().codebook_starts().count(), 0);
+}
+
+#[test]
 fn frames_decode_vqfk_key_frames_and_vptk_and_vptd_tables() {
     // Westwood's VQA loader (WINVQ/VQA32/LOADER.CPP in EA's GPL Red Alert
     // source) reads a VQFK chunk like a VQFR, flagging a key frame, and
