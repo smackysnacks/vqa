@@ -84,7 +84,9 @@
 //!
 //! Malformed input fails with an [`Error`] rather than panicking, and
 //! allocation sizes taken from the file are capped, so the crate is safe to
-//! run on untrusted data (its fuzz targets run nightly in CI).
+//! run on untrusted data (its fuzz targets run nightly in CI). An error says
+//! what went wrong ([`Error::kind`]) and, where known, where: the frame, the
+//! chunk, and the chunk's byte offset in the file.
 //!
 //! The `doc/` directory of the repository carries the format references this
 //! crate is written against: `vqa.txt` for v1/v2 and `hc-vqa.txt` for the
@@ -94,7 +96,7 @@
 #![warn(missing_docs)]
 
 pub use chunk::{Chunk, Chunks};
-pub use error::Error;
+pub use error::{Error, ErrorKind, Limit, VideoError};
 pub use header::{FrameInfo, VQAHeader, VQAVersion};
 pub use movie::{AudioChunks, Frames, VQA};
 pub use video::{Frame, FrameDecoder, FramePixels, FramePixelsRef, FrameRef};

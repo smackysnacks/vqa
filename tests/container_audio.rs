@@ -8,13 +8,14 @@
 
 mod common;
 
-use std::collections::HashSet;
 use std::error::Error as StdError;
 
-use common::{chunk, header_8bit, header_hicolor, lcw_literals, movie, vqhd};
+use common::{chunk, header_8bit, header_hicolor, kind, lcw_literals, movie, vqhd};
 use vqa::audio::{CodecState, decompress};
 use vqa::lcw::LcwError;
-use vqa::{Error, Frame, FramePixels, VQA, VQAHeader, VQAVersion};
+use vqa::{
+    Error, ErrorKind, Frame, FrameDecoder, FramePixels, VQA, VQAHeader, VQAVersion, VideoError,
+};
 
 /// Wrap already-built chunks in `FORM` + `WVQA`, without adding a header,
 /// so tests can supply a malformed VQHD.
@@ -200,9 +201,16 @@ fn parse_rejects_files_that_are_not_form_files() {
     // vqa.txt, FORM chunk: the file is one FORM chunk
     let mut file = movie(&header_8bit(), &[]);
     file[..4].copy_from_slice(b"RIFF");
-    assert_eq!(VQA::parse(&file), Err(Error::Parse));
-    assert_eq!(VQA::parse(&[]), Err(Error::Parse));
-    assert_eq!(VQA::parse(b"FOR"), Err(Error::Parse));
+    assert_eq!(kind(VQA::parse(&file)), Err(ErrorKind::NotVqa));
+    assert_eq!(kind(VQA::parse(&[])), Err(ErrorKind::NotVqa));
+    assert_eq!(kind(VQA::parse(b"RIF")), Err(ErrorKind::NotVqa));
+    assert_eq!(kind(VQA::parse(b"FORM\0\0\0\0WAV")), Err(ErrorKind::NotVqa));
+    // a file cut short inside FORM and WVQA may still be a movie
+    assert_eq!(kind(VQA::parse(b"FOR")), Err(ErrorKind::Truncated));
+    assert_eq!(
+        kind(VQA::parse(b"FORM\0\0\0\0WVQ")),
+        Err(ErrorKind::Truncated)
+    );
 }
 
 #[test]
@@ -211,7 +219,7 @@ fn parse_rejects_a_missing_wvqa_signature() {
     let mut file = movie(&header_8bit(), &[]);
     assert_eq!(&file[8..12], b"WVQA");
     file[8..12].copy_from_slice(b"WAVE");
-    assert_eq!(VQA::parse(&file), Err(Error::Parse));
+    assert_eq!(kind(VQA::parse(&file)), Err(ErrorKind::NotVqa));
 }
 
 #[test]
@@ -223,14 +231,25 @@ fn parse_rejects_a_vqhd_size_other_than_42() {
         let mut vqhd_chunk = chunk(b"VQHD", &vqhd(&header_8bit()));
         vqhd_chunk[4..8].copy_from_slice(&size.to_be_bytes());
         let file = form(&[vqhd_chunk]);
-        assert_eq!(VQA::parse(&file), Err(Error::Parse), "size {size}");
+        let error = VQA::parse(&file).unwrap_err();
+        assert_eq!(
+            (error.kind(), error.chunk(), error.offset()),
+            (ErrorKind::InvalidHeader, Some(*b"VQHD"), Some(12)),
+            "size {size}"
+        );
     }
 
     // and a 44-byte payload that really is 44 bytes long
     let mut long_payload = vqhd(&header_8bit());
     long_payload.extend([0, 0]);
     let long = form(&[chunk(b"VQHD", &long_payload)]);
-    assert_eq!(VQA::parse(&long), Err(Error::Parse));
+    assert_eq!(kind(VQA::parse(&long)), Err(ErrorKind::InvalidHeader));
+
+    // and something else where VQHD should be
+    let file = form(&[chunk(b"FINF", &[0; 4])]);
+    assert_eq!(kind(VQA::parse(&file)), Err(ErrorKind::InvalidHeader));
+    let file = form(&[b"vqhd".to_vec()]);
+    assert_eq!(kind(VQA::parse(&file)), Err(ErrorKind::InvalidHeader));
 }
 
 #[test]
@@ -239,7 +258,16 @@ fn parse_rejects_a_truncated_vqhd() {
     // size is right but the file ends after 20 of them
     let mut file = form(&[chunk(b"VQHD", &vqhd(&header_8bit()))]);
     file.truncate(file.len() - 22);
-    assert_eq!(VQA::parse(&file), Err(Error::Parse));
+    let error = VQA::parse(&file).unwrap_err();
+    assert_eq!(
+        (error.kind(), error.chunk(), error.offset()),
+        (ErrorKind::Truncated, Some(*b"VQHD"), Some(12))
+    );
+    // or inside its chunk header
+    for len in [12, 14, 19] {
+        file.truncate(len);
+        assert_eq!(kind(VQA::parse(&file)), Err(ErrorKind::Truncated), "{len}");
+    }
 }
 
 #[test]
@@ -249,7 +277,11 @@ fn parse_rejects_versions_0_and_4() {
         let mut payload = vqhd(&header_8bit());
         payload[..2].copy_from_slice(&version.to_le_bytes());
         let file = form(&[chunk(b"VQHD", &payload)]);
-        assert_eq!(VQA::parse(&file), Err(Error::Parse), "version {version}");
+        assert_eq!(
+            kind(VQA::parse(&file)),
+            Err(ErrorKind::InvalidHeader),
+            "version {version}"
+        );
     }
 }
 
@@ -325,21 +357,31 @@ fn chunks_yields_one_parse_error_on_a_desync_then_stops() {
     size_past_end.extend(100u32.to_be_bytes());
     size_past_end.extend([1, 2, 3, 4]);
 
-    let desyncs: [(&str, Vec<u8>); 5] = [
-        ("lowercase ID", bad_id(b"linf")),
-        ("space in ID", bad_id(b"SND ")),
-        ("non-ASCII ID", bad_id(b"\xff\xfe\xfd\xfc")),
-        ("size past the end", size_past_end),
-        ("partial chunk header", b"SND2\0\0".to_vec()),
+    // a bad ID is a lost place; a chunk running past the end of the file a
+    // cut-off file. Either way the error points at the bad chunk, 10 bytes
+    // after the LINF chunk that starts the body at offset 62
+    let invalid = (ErrorKind::InvalidChunk, None);
+    let cut = (ErrorKind::Truncated, Some(*b"SND2"));
+    let desyncs: [(&str, Vec<u8>, _); 5] = [
+        ("lowercase ID", bad_id(b"linf"), invalid),
+        ("space in ID", bad_id(b"SND "), invalid),
+        ("non-ASCII ID", bad_id(b"\xff\xfe\xfd\xfc"), invalid),
+        ("size past the end", size_past_end, cut),
+        ("partial chunk header", b"SND2\0\0".to_vec(), cut),
     ];
-    for (what, bad) in desyncs {
+    for (what, bad, (kind, id)) in desyncs {
         let mut file = movie(&header_8bit(), &[chunk(b"LINF", &[1, 2])]);
         file.extend(bad);
         let vqa = VQA::parse(&file).unwrap();
 
         let mut chunks = vqa.chunks();
         assert_eq!(&chunks.next().unwrap().unwrap().id, b"LINF", "{what}");
-        assert_eq!(chunks.next(), Some(Err(Error::Parse)), "{what}");
+        let error = chunks.next().unwrap().unwrap_err();
+        assert_eq!(
+            (error.kind(), error.chunk(), error.offset()),
+            (kind, id, Some(72)),
+            "{what}"
+        );
         assert_eq!(chunks.next(), None, "{what}");
         assert_eq!(chunks.next(), None, "{what}");
     }
@@ -602,7 +644,10 @@ fn frames_stops_after_the_first_error() {
     let mut frames = vqa.frames().unwrap();
 
     assert_eq!(indexed(frames.next()), (FRAME1.to_vec(), vec![]));
-    assert!(matches!(frames.next(), Some(Err(Error::Video(_)))));
+    assert!(matches!(
+        frames.next().map(kind),
+        Some(Err(ErrorKind::Video(_)))
+    ));
     assert!(frames.next().is_none());
     assert!(frames.next().is_none());
 }
@@ -625,10 +670,20 @@ fn frames_stops_after_a_bad_vqfl() {
     let mut frames = vqa.frames().unwrap();
 
     assert_eq!(indexed(frames.next()), (FRAME1.to_vec(), vec![]));
-    assert!(matches!(
-        frames.next(),
-        Some(Err(Error::Lcw(LcwError::Truncated)))
-    ));
+    // the error names the frame being looked for and the VQFL's codebook,
+    // 8 bytes into the VQFL chunk
+    let vqfl = vqa.chunks().nth(1).unwrap().unwrap();
+    assert_eq!(&vqfl.id, b"VQFL");
+    let error = frames.next().unwrap().unwrap_err();
+    assert_eq!(
+        (error.kind(), error.chunk(), error.offset(), error.frame()),
+        (
+            ErrorKind::Lcw(LcwError::Truncated),
+            Some(*b"CBFZ"),
+            Some(vqfl.offset + 8),
+            Some(1)
+        )
+    );
     assert!(frames.next().is_none());
     assert!(frames.next().is_none());
 }
@@ -647,8 +702,8 @@ fn frames_nth_over_a_bad_frame_is_none() {
     assert!(frames.next().is_none());
 
     assert!(matches!(
-        vqa.frames().unwrap().nth(1),
-        Some(Err(Error::Video(_)))
+        vqa.frames().unwrap().nth(1).map(kind),
+        Some(Err(ErrorKind::Video(_)))
     ));
 }
 
@@ -664,8 +719,164 @@ fn frames_of_a_movie_cut_off_mid_chunk_end_with_one_parse_error() {
 
     assert_eq!(indexed(frames.next()), (FRAME1.to_vec(), PALETTE.to_vec()));
     assert_eq!(indexed(frames.next()), (FRAME2.to_vec(), PALETTE.to_vec()));
-    assert!(matches!(frames.next(), Some(Err(Error::Parse))));
+    let vqfr = vqa.chunks().last().unwrap().unwrap_err();
+    let error = frames.next().unwrap().unwrap_err();
+    assert_eq!(
+        (error.kind(), error.chunk(), error.offset(), error.frame()),
+        (ErrorKind::Truncated, Some(*b"VQFR"), vqfr.offset(), Some(2))
+    );
     assert!(frames.next().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Where errors happened
+
+/// An error's kind, chunk, offset and frame.
+fn place(e: &Error) -> (ErrorKind, Option<[u8; 4]>, Option<usize>, Option<usize>) {
+    (e.kind(), e.chunk(), e.offset(), e.frame())
+}
+
+#[test]
+fn frame_errors_name_the_frame_the_sub_chunk_and_its_file_offset() {
+    let file = bad_frame_2_movie();
+    let vqa = VQA::parse(&file).unwrap();
+    // frame 1's VQFR is the second chunk, its one sub-chunk 8 bytes in
+    let vqfr = vqa.chunks().nth(1).unwrap().unwrap();
+    let vpt0 = vqfr.sub_chunks().next().unwrap().unwrap();
+    assert_eq!(vpt0.offset, vqfr.offset + 8);
+
+    let size = ErrorKind::Video(VideoError::PointerTableSize);
+    let error = vqa.frames().unwrap().nth(1).unwrap().unwrap_err();
+    assert_eq!(
+        place(&error),
+        (size, Some(*b"VPT0"), Some(vpt0.offset), Some(1))
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "malformed video data: pointer table size mismatch \
+             (frame 1, VPT0 chunk at offset {:#x})",
+            vpt0.offset
+        )
+    );
+
+    // a FrameDecoder counts from the start of the payload it is given
+    let mut decoder = FrameDecoder::new(&vqa.header).unwrap();
+    let error = decoder.decode_frame(vqfr.data).unwrap_err();
+    assert_eq!(place(&error), (size, Some(*b"VPT0"), Some(0), None));
+}
+
+#[test]
+fn a_sub_chunk_overrunning_its_frame_is_corrupt_not_cut_off() {
+    // a VPT0 claiming 100 bytes inside a VQFR holding 16, with more of the
+    // file after it
+    let mut vpt0 = chunk(b"VPT0", &[0; 8]);
+    vpt0[4..8].copy_from_slice(&100u32.to_be_bytes());
+    let file = movie(
+        &header_8bit(),
+        &[chunk(b"VQFR", &vpt0), chunk(b"SND2", &[0x77; 200])],
+    );
+    let vqa = VQA::parse(&file).unwrap();
+    let error = vqa.frames().unwrap().next().unwrap().unwrap_err();
+    // the body starts at 62, so the VQFR's payload at 70
+    assert_eq!(
+        place(&error),
+        (ErrorKind::InvalidChunk, Some(*b"VPT0"), Some(70), Some(0))
+    );
+}
+
+#[test]
+fn errors_after_a_frames_last_sub_chunk_are_placed_in_its_container() {
+    // with cbparts 1, the frame's one part completes a codebook, which is
+    // decompressed when the frame ends; 0x85 asks for 5 literal bytes and
+    // has 1 (vqa.txt, Appendix A)
+    let header = VQAHeader {
+        cbparts: 1,
+        ..header_8bit()
+    };
+    let file = movie(
+        &header,
+        &[vqfr(&[
+            chunk(b"CBF0", &codebook(0)),
+            chunk(b"CBPZ", &[0x85, 1]),
+            chunk(b"VPT0", &TWO_ENTRY_TABLE),
+        ])],
+    );
+    let vqa = VQA::parse(&file).unwrap();
+    let error = vqa.frames().unwrap().next().unwrap().unwrap_err();
+    let truncated = ErrorKind::Lcw(LcwError::Truncated);
+    assert_eq!(
+        place(&error),
+        (truncated, Some(*b"VQFR"), Some(62), Some(0))
+    );
+}
+
+#[test]
+fn older_layout_errors_name_the_top_level_chunk() {
+    // CBF0 of 16 bytes is 24 bytes long from offset 62: the next chunk
+    // starts at 86
+    let bad_palette = movie(
+        &header_8bit(),
+        &[
+            chunk(b"CBF0", &codebook(0)),
+            chunk(b"CPL0", &[0; 4]),
+            chunk(b"VPT0", &TWO_ENTRY_TABLE),
+        ],
+    );
+    let bad_table = movie(
+        &header_8bit(),
+        &[chunk(b"CBF0", &codebook(0)), chunk(b"VPT0", &[0; 6])],
+    );
+    for (file, cause, id) in [
+        (bad_palette, VideoError::PaletteSize, *b"CPL0"),
+        (bad_table, VideoError::PointerTableSize, *b"VPT0"),
+    ] {
+        let vqa = VQA::parse(&file).unwrap();
+        let error = vqa.frames().unwrap().next().unwrap().unwrap_err();
+        assert_eq!(
+            place(&error),
+            (ErrorKind::Video(cause), Some(id), Some(86), Some(0))
+        );
+    }
+}
+
+#[test]
+fn a_failed_scheduled_codebook_swap_names_only_the_frame() {
+    // the CINF schedule starts a codebook at frame 1, swapping in frame 0's
+    // malformed part before any of frame 1's chunks are read
+    let file = movie(
+        &header_8bit(),
+        &[
+            cinf(&[0, 1]),
+            vqfr(&[
+                chunk(b"CBF0", &codebook(0)),
+                chunk(b"CBPZ", &[0x85, 1]),
+                chunk(b"VPT0", &TWO_ENTRY_TABLE),
+            ]),
+            vqfr(&[chunk(b"VPT0", &TWO_ENTRY_TABLE)]),
+        ],
+    );
+    let vqa = VQA::parse(&file).unwrap();
+    let mut frames = vqa.frames().unwrap();
+    assert!(frames.next().unwrap().is_ok());
+    let error = frames.next().unwrap().unwrap_err();
+    let truncated = ErrorKind::Lcw(LcwError::Truncated);
+    assert_eq!(place(&error), (truncated, None, None, Some(1)));
+}
+
+#[test]
+fn an_undecodable_header_fails_frames_at_the_vqhd_chunk() {
+    let header = VQAHeader {
+        block_width: 0,
+        ..header_8bit()
+    };
+    let file = movie(&header, &[]);
+    let vqa = VQA::parse(&file).unwrap();
+    let error = vqa.frames().err().unwrap();
+    assert_eq!(
+        place(&error),
+        (ErrorKind::InvalidHeader, Some(*b"VQHD"), Some(12), None)
+    );
 }
 
 /// The frame `codebook(base)` draws under the pointer table
@@ -1026,9 +1237,13 @@ fn audio_chunks_keep_the_sound_before_a_cut_off_chunk() {
 
     let mut chunks = vqa.audio_chunks();
     assert_eq!(chunks.next(), Some(Ok(MONO_SAMPLES[..4].to_vec())));
-    assert_eq!(chunks.next(), Some(Err(Error::Parse)));
+    let error = chunks.next().unwrap().unwrap_err();
+    assert_eq!(
+        (error.kind(), error.chunk(), error.frame()),
+        (ErrorKind::Truncated, Some(*b"SND2"), None)
+    );
     assert_eq!(chunks.next(), None);
-    assert_eq!(vqa.decode_audio(), Err(Error::Parse));
+    assert_eq!(vqa.decode_audio(), Err(error));
 }
 
 #[test]
@@ -1325,26 +1540,22 @@ fn decode_audio_keeps_the_left_predictor_in_step_over_an_odd_v1_v2_chunk() {
 // Error
 
 #[test]
-fn error_messages_are_nonempty_and_distinct_per_variant() {
-    // locks current behavior
-    let errors = [
-        Error::Parse,
-        Error::Lcw(LcwError::Truncated),
-        Error::TooLarge("x"),
-        Error::Video("x"),
-        Error::UnsupportedSound("x"),
-    ];
-    let messages: HashSet<String> = errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages.len(), errors.len());
-    assert!(messages.iter().all(|message| !message.is_empty()));
+fn errors_are_thread_safe_std_errors() {
+    fn check<T: StdError + Send + Sync + 'static>() {}
+    check::<Error>();
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<VQA<'static>>();
+    send_sync::<vqa::Frames<'static>>();
+    send_sync::<vqa::AudioChunks<'static>>();
+    send_sync::<vqa::Chunks<'static>>();
+    send_sync::<vqa::FrameDecoder>();
 }
 
 #[test]
-fn lcw_errors_convert_into_error_and_are_its_source() {
-    // locks current behavior
+fn lcw_errors_convert_into_error_and_show_in_its_message() {
     assert_eq!(
-        Error::from(LcwError::BadOffset),
-        Error::Lcw(LcwError::BadOffset)
+        Error::from(LcwError::BadOffset).kind(),
+        ErrorKind::Lcw(LcwError::BadOffset)
     );
 
     fn fails() -> Result<(), Error> {
@@ -1353,24 +1564,8 @@ fn lcw_errors_convert_into_error_and_are_its_source() {
         Ok(())
     }
     let error = fails().unwrap_err();
-    assert_eq!(error, Error::Lcw(LcwError::Truncated));
-
-    let source = error.source().expect("an LCW error has a source");
-    assert_eq!(
-        source.downcast_ref::<LcwError>(),
-        Some(&LcwError::Truncated)
-    );
-}
-
-#[test]
-fn other_errors_have_no_source() {
-    // locks current behavior
-    for error in [
-        Error::Parse,
-        Error::TooLarge("x"),
-        Error::Video("x"),
-        Error::UnsupportedSound("x"),
-    ] {
-        assert!(error.source().is_none(), "{error:?}");
-    }
+    assert_eq!(error.kind(), ErrorKind::Lcw(LcwError::Truncated));
+    // as with io::Error, the reason is in the message rather than a source
+    assert!(error.to_string().contains(&LcwError::Truncated.to_string()));
+    assert!(error.source().is_none());
 }

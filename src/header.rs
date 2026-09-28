@@ -1,7 +1,7 @@
 //! The movie header (the VQHD chunk) and the frame index entries (the FINF
 //! chunk).
 
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 
 /// The format version stored in the header.
 ///
@@ -40,7 +40,7 @@ impl TryFrom<u16> for VQAVersion {
             1 => Ok(VQAVersion::One),
             2 => Ok(VQAVersion::Two),
             3 => Ok(VQAVersion::Three),
-            _ => Err(Error::Parse),
+            _ => Err(ErrorKind::InvalidHeader.into()),
         }
     }
 }
@@ -114,7 +114,9 @@ impl VQAHeader {
     /// Fails unless `vqhd` is exactly 42 bytes long and holds version 1, 2
     /// or 3.
     pub fn parse(vqhd: &[u8]) -> Result<VQAHeader, Error> {
-        let vqhd: &[u8; HEADER_LEN] = vqhd.try_into().map_err(|_| Error::Parse)?;
+        let vqhd: &[u8; HEADER_LEN] = vqhd
+            .try_into()
+            .map_err(|_| Error::from(ErrorKind::InvalidHeader))?;
         let u16_at = |at: usize| u16::from_le_bytes([vqhd[at], vqhd[at + 1]]);
         let u32_at =
             |at: usize| u32::from_le_bytes(vqhd[at..at + 4].try_into().expect("four bytes"));

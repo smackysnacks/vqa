@@ -11,8 +11,8 @@
 
 mod common;
 
-use common::{chunk, header_hicolor, lcw_literals, movie};
-use vqa::{Error, Frame, FrameDecoder, FramePixels, VQA, VQAHeader};
+use common::{chunk, header_hicolor, kind, lcw_literals, movie};
+use vqa::{ErrorKind, Frame, FrameDecoder, FramePixels, VQA, VQAHeader, VideoError};
 
 /// Little-endian bytes of 16-bit words: codebook pixels or VPTR commands.
 fn le(words: &[u16]) -> Vec<u8> {
@@ -922,8 +922,8 @@ fn dangling_odd_byte_after_the_last_command_is_an_error() {
     for stream in [vec![0x60], [le(&[0b011_0000000000000]), vec![0]].concat()] {
         let mut decoder = FrameDecoder::new(&header_hicolor()).unwrap();
         assert_eq!(
-            decoder.decode_frame(&chunk(b"VPTR", &stream)),
-            Err(Error::Video("dangling byte in pointer stream")),
+            kind(decoder.decode_frame(&chunk(b"VPTR", &stream))),
+            Err(ErrorKind::Video(VideoError::TruncatedPointerStream)),
             "{stream:02x?}"
         );
     }
@@ -947,8 +947,8 @@ fn stream_ending_before_an_index_or_count_byte_is_truncated() {
     for stream in streams {
         let mut decoder = FrameDecoder::new(&header_hicolor()).unwrap();
         assert_eq!(
-            decoder.decode_frame(&chunk(b"VPTR", &stream)),
-            Err(Error::Video("truncated pointer stream")),
+            kind(decoder.decode_frame(&chunk(b"VPTR", &stream))),
+            Err(ErrorKind::Video(VideoError::TruncatedPointerStream)),
             "{stream:02x?}"
         );
     }
@@ -981,8 +981,8 @@ fn writes_past_the_last_block_are_errors() {
     for stream in past {
         let mut decoder = FrameDecoder::new(&header_hicolor()).unwrap();
         assert_eq!(
-            decoder.decode_frame(&[codebook.clone(), chunk(b"VPTR", &stream)].concat()),
-            Err(Error::Video("pointer stream writes past the frame")),
+            kind(decoder.decode_frame(&[codebook.clone(), chunk(b"VPTR", &stream)].concat())),
+            Err(ErrorKind::Video(VideoError::PointerStreamOverrun)),
             "{stream:02x?}"
         );
     }
@@ -1037,8 +1037,8 @@ fn vpt0_and_vptz_pointer_tables_are_errors_in_a_hicolor_movie() {
     ] {
         let mut decoder = FrameDecoder::new(&header_hicolor()).unwrap();
         assert_eq!(
-            decoder.decode_frame(&vqfr),
-            Err(Error::Video("VPT? pointer table in a HiColor movie"))
+            kind(decoder.decode_frame(&vqfr)),
+            Err(ErrorKind::Video(VideoError::WrongPointerFormat))
         );
     }
 }

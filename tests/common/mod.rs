@@ -4,7 +4,7 @@
 // each test crate uses only some of these
 #![allow(dead_code)]
 
-use vqa::{VQAHeader, VQAVersion};
+use vqa::{Error, ErrorKind, VQAHeader, VQAVersion};
 
 /// Wrap `data` in a chunk: the ID, the big-endian size, the payload, and a
 /// pad byte after an odd-sized payload.
@@ -113,6 +113,12 @@ pub fn movie(header: &VQAHeader, chunks: &[Vec<u8>]) -> Vec<u8> {
     file.extend((body.len() as u32).to_be_bytes());
     file.extend(body);
     file
+}
+
+/// A result with its error's kind in place of the error, so tests compare
+/// what went wrong rather than where.
+pub fn kind<T>(result: Result<T, Error>) -> Result<T, ErrorKind> {
+    result.map_err(|e| e.kind())
 }
 
 /// FNV-1a 64 offset basis.

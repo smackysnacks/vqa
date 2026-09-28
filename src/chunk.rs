@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 
 /// The size of a chunk's header: the ID and the payload size.
 const HEADER_LEN: usize = 8;
@@ -38,6 +38,7 @@ impl<'a> Chunk<'a> {
         Chunks {
             input: self.data,
             offset: self.offset + HEADER_LEN,
+            nested: true,
         }
     }
 }
@@ -66,6 +67,9 @@ pub struct Chunks<'a> {
     input: &'a [u8],
     /// the offset of `input` from where the walk's offsets count
     offset: usize,
+    /// whether `input` is a whole payload, where running past its end is
+    /// corruption rather than a cut-off file
+    nested: bool,
 }
 
 impl<'a> Chunks<'a> {
@@ -80,18 +84,18 @@ impl<'a> Chunks<'a> {
         Chunks {
             input: data,
             offset,
+            nested: false,
         }
     }
 
     /// Walk the chunks in `data`, a whole payload: [`Chunk::sub_chunks`]
     /// for a payload handed over without its chunk.
     pub(crate) fn payload(data: &'a [u8]) -> Chunks<'a> {
-        Chunks::at(data, 0)
-    }
-
-    /// The input not walked yet, and its offset.
-    pub(crate) fn remaining(&self) -> (&'a [u8], usize) {
-        (self.input, self.offset)
+        Chunks {
+            input: data,
+            offset: 0,
+            nested: true,
+        }
     }
 
     fn next_chunk(&mut self) -> Result<Chunk<'a>, Error> {
@@ -101,15 +105,23 @@ impl<'a> Chunks<'a> {
             .iter()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
         {
-            return Err(Error::Parse);
+            return Err(Error::at(ErrorKind::InvalidChunk, None, self.offset));
         }
-        let Some((header, rest)) = input.split_first_chunk::<HEADER_LEN>() else {
-            return Err(Error::Parse);
+        // past the end of a whole payload the data is corrupt; past the end
+        // of the input the file is cut short
+        let overrun = if self.nested {
+            ErrorKind::InvalidChunk
+        } else {
+            ErrorKind::Truncated
         };
-        let (id, size) = header.split_at(4);
+        let Some((header, rest)) = input.split_first_chunk::<HEADER_LEN>() else {
+            let id = input.first_chunk::<4>().copied();
+            return Err(Error::at(overrun, id, self.offset));
+        };
+        let (id, size) = header.split_first_chunk::<4>().expect("eight bytes");
         let size = u32::from_be_bytes(size.try_into().expect("four bytes"));
         let Some(data) = usize::try_from(size).ok().and_then(|size| rest.get(..size)) else {
-            return Err(Error::Parse);
+            return Err(Error::at(overrun, Some(*id), self.offset));
         };
         let mut rest = &rest[data.len()..];
         if data.len() % 2 == 1 && !rest.is_empty() {
@@ -117,7 +129,7 @@ impl<'a> Chunks<'a> {
         }
 
         let chunk = Chunk {
-            id: id.try_into().expect("four bytes"),
+            id: *id,
             offset: self.offset,
             data,
         };
@@ -175,26 +187,82 @@ mod tests {
         assert_eq!(chunks, vec![Ok((*b"SND2", 0, &b"abc"[..]))]);
     }
 
-    #[test]
-    fn rejects_non_chunk_ids_and_stops() {
-        assert_eq!(walk(b"lin \x00\x00\x00\x00"), vec![Err(Error::Parse)]);
-        assert_eq!(
-            walk(b"\x00\x01\x02\x03\x00\x00\x00\x00"),
-            vec![Err(Error::Parse)]
-        );
-        // a bad ID fails even when the input ends inside it
-        assert_eq!(walk(b"SN"), vec![Err(Error::Parse)]);
-        assert_eq!(walk(b"s"), vec![Err(Error::Parse)]);
+    /// An error's kind, chunk and offset.
+    fn located(e: &Error) -> (ErrorKind, Option<[u8; 4]>, Option<usize>) {
+        (e.kind(), e.chunk(), e.offset())
+    }
+
+    /// The error ending the walk of `input`.
+    fn failure(chunks: Chunks<'_>) -> (ErrorKind, Option<[u8; 4]>, Option<usize>) {
+        let errors: Vec<_> = chunks.filter_map(Result::err).collect();
+        assert_eq!(errors.len(), 1);
+        located(&errors[0])
     }
 
     #[test]
-    fn rejects_chunks_running_past_the_input() {
-        assert_eq!(walk(b"SND2\x00\x00\x00\x05abcd"), vec![Err(Error::Parse)]);
-        assert_eq!(walk(b"SND2\x00\x00\x00"), vec![Err(Error::Parse)]);
-        assert_eq!(walk(b"SND2\xff\xff\xff\xff"), vec![Err(Error::Parse)]);
+    fn rejects_non_chunk_ids_and_stops() {
+        let invalid = (ErrorKind::InvalidChunk, None, Some(0));
+        assert_eq!(failure(Chunks::new(b"lin \x00\x00\x00\x00")), invalid);
+        assert_eq!(
+            failure(Chunks::new(b"\x00\x01\x02\x03\x00\x00\x00\x00")),
+            invalid
+        );
+        // a bad ID fails even when the input ends inside it
+        assert_eq!(failure(Chunks::new(b"SNd")), invalid);
+        assert_eq!(failure(Chunks::new(b"s")), invalid);
+        // and it isn't taken for the end of a cut-off file
+        let chunks: Vec<_> = Chunks::new(b"SND2\x00\x00\x00\x00snd2").collect();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            located(chunks[1].as_ref().unwrap_err()),
+            (ErrorKind::InvalidChunk, None, Some(8))
+        );
+    }
+
+    #[test]
+    fn a_chunk_running_past_the_input_is_a_cut_off_file() {
+        let cut = |id| (ErrorKind::Truncated, id, Some(0));
+        assert_eq!(
+            failure(Chunks::new(b"SND2\x00\x00\x00\x05abcd")),
+            cut(Some(*b"SND2"))
+        );
+        assert_eq!(
+            failure(Chunks::new(b"SND2\x00\x00\x00")),
+            cut(Some(*b"SND2"))
+        );
+        assert_eq!(
+            failure(Chunks::new(b"SND2\xff\xff\xff\xff")),
+            cut(Some(*b"SND2"))
+        );
+        assert_eq!(failure(Chunks::new(b"SND")), cut(None));
         // the chunks before the bad one come out first
         let chunks = walk(b"SND2\x00\x00\x00\x00SND");
-        assert_eq!(chunks, vec![Ok((*b"SND2", 0, &b""[..])), Err(Error::Parse)]);
+        assert_eq!(chunks[0], Ok((*b"SND2", 0, &b""[..])));
+        assert_eq!(
+            located(chunks[1].as_ref().unwrap_err()),
+            (ErrorKind::Truncated, None, Some(8))
+        );
+        assert_eq!(chunks.len(), 2);
+    }
+
+    #[test]
+    fn a_sub_chunk_running_past_its_container_is_corrupt() {
+        // a VQFR whose one sub-chunk claims 16 bytes but has 2
+        let input = b"VQFR\x00\x00\x00\x0aVPT0\x00\x00\x00\x10ab";
+        let vqfr = Chunks::new(input).next().unwrap().unwrap();
+        assert_eq!(
+            failure(vqfr.sub_chunks()),
+            (ErrorKind::InvalidChunk, Some(*b"VPT0"), Some(8))
+        );
+        assert_eq!(
+            failure(Chunks::payload(vqfr.data)),
+            (ErrorKind::InvalidChunk, Some(*b"VPT0"), Some(0))
+        );
+        // the same bytes on their own read as a cut-off file
+        assert_eq!(
+            failure(Chunks::new(vqfr.data)),
+            (ErrorKind::Truncated, Some(*b"VPT0"), Some(0))
+        );
     }
 
     #[test]

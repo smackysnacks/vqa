@@ -11,9 +11,12 @@
 
 mod common;
 
-use common::{chunk, header_8bit, lcw_literals};
+use common::{chunk, header_8bit, kind, lcw_literals};
 use vqa::lcw::{self, LcwError};
-use vqa::{Error, Frame, FrameDecoder, FramePixels, FramePixelsRef, VQAHeader, VQAVersion};
+use vqa::{
+    Error, ErrorKind, Frame, FrameDecoder, FramePixels, FramePixelsRef, Limit, VQAHeader,
+    VQAVersion, VideoError,
+};
 
 /// The palette indices and palette of an 8-bit frame.
 fn indexed(frame: &Frame) -> (&[u8], &[[u8; 3]]) {
@@ -159,8 +162,8 @@ fn v2_4x2_blocks_fill_on_hival_0x0f_whatever_maxblocks() {
 
     let table = [66, 66, 66, 66, /* HiVal */ 0xff, 0xff, 0xff, 0xff];
     assert_eq!(
-        decode_one(&header, &[chunk(b"VPT0", &table)]),
-        Err(Error::Video("block index outside the codebook"))
+        kind(decode_one(&header, &[chunk(b"VPT0", &table)])),
+        Err(ErrorKind::Video(VideoError::BlockIndexOutOfRange))
     );
 }
 
@@ -188,8 +191,8 @@ fn maxblocks_0_caps_the_codebook_at_0xff00_entries() {
 
     // the same 0x1001-entry codebook is past the cap at maxblocks 0x0f00
     assert_eq!(
-        decode_one(&header_8bit(), &chunks),
-        Err(Error::TooLarge("codebook"))
+        kind(decode_one(&header_8bit(), &chunks)),
+        Err(ErrorKind::TooLarge(Limit::Codebook))
     );
 
     // the cap at maxblocks 0 is 0xff00 entries of 4x2 bytes
@@ -197,8 +200,8 @@ fn maxblocks_0_caps_the_codebook_at_0xff00_entries() {
     assert!(decode_one(&header, &[at_cap]).is_ok());
     let past_cap = chunk(b"CBF0", &vec![0; 0xff01 * 8]);
     assert_eq!(
-        decode_one(&header, &[past_cap]),
-        Err(Error::TooLarge("codebook"))
+        kind(decode_one(&header, &[past_cap])),
+        Err(ErrorKind::TooLarge(Limit::Codebook))
     );
 }
 
@@ -259,8 +262,8 @@ fn v2_4x4_blocks_fill_on_hival_0xff_whatever_maxblocks() {
 
     let table = chunk(b"VPT0", &[1, 99, 0, 1, /* HiVal */ 0, 0x0f, 0, 0]);
     assert_eq!(
-        decode_one(&header, &[book, table]),
-        Err(Error::Video("block index outside the codebook"))
+        kind(decode_one(&header, &[book, table])),
+        Err(ErrorKind::Video(VideoError::BlockIndexOutOfRange))
     );
 }
 
@@ -538,8 +541,8 @@ fn a_bad_joined_cbpz_stream_fails_the_frame_carrying_the_last_part() {
     assert_eq!(pixels(&decoder.decode_frame(&vqfr).unwrap()), OLD_FRAME);
     let vqfr = [chunk(b"CBPZ", &[0xfe, 0x08]), table].concat();
     assert_eq!(
-        decoder.decode_frame(&vqfr),
-        Err(Error::Lcw(LcwError::Truncated))
+        kind(decoder.decode_frame(&vqfr)),
+        Err(ErrorKind::Lcw(LcwError::Truncated))
     );
 }
 
@@ -838,8 +841,8 @@ fn new_rejects_a_zero_block_size() {
             ..header_8bit()
         };
         assert_eq!(
-            FrameDecoder::new(&header).err(),
-            Some(Error::Video("block size is zero"))
+            FrameDecoder::new(&header).err().map(|e| e.kind()),
+            Some(ErrorKind::InvalidHeader)
         );
     }
 }
@@ -855,8 +858,10 @@ fn new_caps_frames_at_1_shl_24_pixels() {
     assert!(FrameDecoder::new(&header(4096, 4096)).is_ok());
     for (width, height) in [(4097, 4096), (4096, 4097), (0xffff, 0xffff)] {
         assert_eq!(
-            FrameDecoder::new(&header(width, height)).err(),
-            Some(Error::TooLarge("frame dimensions"))
+            FrameDecoder::new(&header(width, height))
+                .err()
+                .map(|e| e.kind()),
+            Some(ErrorKind::TooLarge(Limit::FrameSize))
         );
     }
 }
@@ -866,10 +871,10 @@ fn rejects_pointer_tables_of_the_wrong_size() {
     // locks current behavior: the 8x4 movie's table is (8/4)*(4/2)*2 = 8
     // bytes (vqa.txt, VPT? chunk)
     let book: Vec<u8> = (0..32).collect();
-    let mismatch = Err(Error::Video("pointer table size mismatch"));
+    let mismatch = Err(ErrorKind::Video(VideoError::PointerTableSize));
     for table in [&[0u8; 6][..], &[0; 7], &[0; 9], &[0; 10]] {
         let chunks = [chunk(b"CBF0", &book), chunk(b"VPT0", table)];
-        assert_eq!(decode_one(&header_8bit(), &chunks), mismatch);
+        assert_eq!(kind(decode_one(&header_8bit(), &chunks)), mismatch);
     }
 
     // a VPTZ decompressing short fails the same way, one decompressing long
@@ -878,37 +883,43 @@ fn rejects_pointer_tables_of_the_wrong_size() {
         chunk(b"CBF0", &book),
         chunk(b"VPTZ", &lcw_literals(&[0; 6])),
     ];
-    assert_eq!(decode_one(&header_8bit(), &chunks), mismatch);
+    assert_eq!(kind(decode_one(&header_8bit(), &chunks)), mismatch);
     let chunks = [
         chunk(b"CBF0", &book),
         chunk(b"VPTZ", &lcw_literals(&[0; 10])),
     ];
     assert_eq!(
-        decode_one(&header_8bit(), &chunks),
-        Err(Error::Lcw(LcwError::TooLarge))
+        kind(decode_one(&header_8bit(), &chunks)),
+        Err(ErrorKind::Lcw(LcwError::TooLarge))
     );
 }
 
 #[test]
 fn rejects_block_indices_past_the_codebook() {
     // locks current behavior
-    let outside = Err(Error::Video("block index outside the codebook"));
+    let outside = Err(ErrorKind::Video(VideoError::BlockIndexOutOfRange));
     let book: Vec<u8> = (0..16).collect(); // entries 0 and 1
 
     // v2: entry 2, and entry 0x0100 (HiVal 1)
     let v2 = header_8bit();
     let table = [0, 1, 2, 0, /* HiVal */ 0, 0, 0, 0];
     assert_eq!(
-        decode_one(&v2, &[chunk(b"CBF0", &book), chunk(b"VPT0", &table)]),
+        kind(decode_one(
+            &v2,
+            &[chunk(b"CBF0", &book), chunk(b"VPT0", &table)]
+        )),
         outside
     );
     let table = [0, 1, 0, 0, /* HiVal */ 0, 0, 0, 1];
     assert_eq!(
-        decode_one(&v2, &[chunk(b"CBF0", &book), chunk(b"VPT0", &table)]),
+        kind(decode_one(
+            &v2,
+            &[chunk(b"CBF0", &book), chunk(b"VPT0", &table)]
+        )),
         outside
     );
     // no codebook at all
-    assert_eq!(decode_one(&v2, &[chunk(b"VPT0", &[0; 8])]), outside);
+    assert_eq!(kind(decode_one(&v2, &[chunk(b"VPT0", &[0; 8])])), outside);
 
     // v1: block 0 is entry 0x0100/8 = 32; read as a v2 table the same bytes
     // would be entries 0, 1, 0, 0, all inside the codebook
@@ -918,7 +929,10 @@ fn rejects_block_indices_past_the_codebook() {
     };
     let table = [0, 1, 0, 0, 0, 0, 0, 0];
     assert_eq!(
-        decode_one(&v1, &[chunk(b"CBF0", &book), chunk(b"VPT0", &table)]),
+        kind(decode_one(
+            &v1,
+            &[chunk(b"CBF0", &book), chunk(b"VPT0", &table)]
+        )),
         outside
     );
 }
@@ -928,22 +942,22 @@ fn rejects_hicolor_pointer_streams_in_8bit_movies() {
     // locks current behavior
     let book: Vec<u8> = (0..8).collect();
     let stream = 0b011_0000000000000u16.to_le_bytes(); // write block 0
-    let expected = Err(Error::Video("VPTR pointer stream in an 8-bit movie"));
+    let expected = Err(ErrorKind::Video(VideoError::WrongPointerFormat));
     assert_eq!(
-        decode_one(
+        kind(decode_one(
             &header_8bit(),
             &[chunk(b"CBF0", &book), chunk(b"VPTR", &stream)]
-        ),
+        )),
         expected
     );
     assert_eq!(
-        decode_one(
+        kind(decode_one(
             &header_8bit(),
             &[
                 chunk(b"CBF0", &book),
                 chunk(b"VPRZ", &lcw_literals(&stream))
             ]
-        ),
+        )),
         expected
     );
 }
@@ -955,7 +969,7 @@ fn rejects_mixed_cbp0_and_cbpz_parts() {
         cbparts: 2,
         ..header_8bit()
     };
-    let mixed = Err(Error::Video("mixed CBP0/CBPZ parts"));
+    let mixed = Err(ErrorKind::Video(VideoError::MixedCodebookParts));
     let book: Vec<u8> = (0..32).collect();
     let table = chunk(b"VPT0", &IDENTITY_TABLE);
 
@@ -969,7 +983,7 @@ fn rejects_mixed_cbp0_and_cbpz_parts() {
     .concat();
     decoder.decode_frame(&vqfr).unwrap();
     let vqfr = [chunk(b"CBPZ", &lcw_literals(&book[16..])), table.clone()].concat();
-    assert_eq!(decoder.decode_frame(&vqfr), mixed);
+    assert_eq!(kind(decoder.decode_frame(&vqfr)), mixed);
 
     // CBPZ then CBP0
     let mut decoder = FrameDecoder::new(&header).unwrap();
@@ -981,18 +995,21 @@ fn rejects_mixed_cbp0_and_cbpz_parts() {
     .concat();
     decoder.decode_frame(&vqfr).unwrap();
     let vqfr = [chunk(b"CBP0", &book[16..]), table].concat();
-    assert_eq!(decoder.decode_frame(&vqfr), mixed);
+    assert_eq!(kind(decoder.decode_frame(&vqfr)), mixed);
 }
 
 #[test]
 fn rejects_palettes_of_bad_sizes() {
     // locks current behavior: whole R, G, B triples, at most 256 colors
-    let size = Err(Error::Video("palette size"));
+    let size = Err(ErrorKind::Video(VideoError::PaletteSize));
     let v2 = header_8bit();
-    assert_eq!(decode_one(&v2, &[chunk(b"CPL0", &[0; 4])]), size);
-    assert_eq!(decode_one(&v2, &[chunk(b"CPL0", &[0; 257 * 3])]), size);
+    assert_eq!(kind(decode_one(&v2, &[chunk(b"CPL0", &[0; 4])])), size);
     assert_eq!(
-        decode_one(&v2, &[chunk(b"CPLZ", &lcw_literals(&[0; 5]))]),
+        kind(decode_one(&v2, &[chunk(b"CPL0", &[0; 257 * 3])])),
+        size
+    );
+    assert_eq!(
+        kind(decode_one(&v2, &[chunk(b"CPLZ", &lcw_literals(&[0; 5]))])),
         size
     );
 
@@ -1003,8 +1020,8 @@ fn rejects_palettes_of_bad_sizes() {
     // a CPLZ expanding past 256 colors hits the LCW output cap
     let cplz = [0xfe, 0x03, 0x03, 0x3f, 0x80]; // fill 0x303 = 257*3 bytes
     assert_eq!(
-        decode_one(&v2, &[chunk(b"CPLZ", &cplz)]),
-        Err(Error::Lcw(LcwError::TooLarge))
+        kind(decode_one(&v2, &[chunk(b"CPLZ", &cplz)])),
+        Err(ErrorKind::Lcw(LcwError::TooLarge))
     );
 }
 
@@ -1028,12 +1045,12 @@ fn rejects_codebooks_larger_than_maxblocks_entries() {
     assert_eq!(pixels(&frame)[2 * 8 + 4..][..4], [8, 9, 10, 11]);
 
     assert_eq!(
-        decode_one(&header, &[chunk(b"CBF0", &book)]),
-        Err(Error::TooLarge("codebook"))
+        kind(decode_one(&header, &[chunk(b"CBF0", &book)])),
+        Err(ErrorKind::TooLarge(Limit::Codebook))
     );
     assert_eq!(
-        decode_one(&header, &[chunk(b"CBFZ", &lcw_literals(&book))]),
-        Err(Error::Lcw(LcwError::TooLarge))
+        kind(decode_one(&header, &[chunk(b"CBFZ", &lcw_literals(&book))])),
+        Err(ErrorKind::Lcw(LcwError::TooLarge))
     );
 
     // parts adding up past the cap fail as the overflowing one arrives
@@ -1044,7 +1061,7 @@ fn rejects_codebooks_larger_than_maxblocks_entries() {
     let mut decoder = FrameDecoder::new(&header).unwrap();
     decoder.decode_frame(&chunk(b"CBP0", &book[..16])).unwrap();
     assert_eq!(
-        decoder.decode_frame(&chunk(b"CBP0", &book[16..])),
-        Err(Error::TooLarge("codebook parts"))
+        kind(decoder.decode_frame(&chunk(b"CBP0", &book[16..]))),
+        Err(ErrorKind::TooLarge(Limit::Codebook))
     );
 }

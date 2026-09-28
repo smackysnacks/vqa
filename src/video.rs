@@ -8,7 +8,7 @@
 //! frame differentially with a VPTR/VPRZ command stream.
 
 use crate::chunk::{Chunk, Chunks};
-use crate::error::Error;
+use crate::error::{Error, ErrorKind, Limit, VideoError};
 use crate::header::{VQAHeader, VQAVersion};
 use crate::lcw;
 use crate::rgb;
@@ -306,13 +306,13 @@ impl FrameDecoder {
         let block_w = usize::from(header.block_width);
         let block_h = usize::from(header.block_height);
         if block_w == 0 || block_h == 0 {
-            return Err(Error::Video("block size is zero"));
+            return Err(ErrorKind::InvalidHeader.into());
         }
 
         let width = usize::from(header.width);
         let height = usize::from(header.height);
         if width * height > MAX_FRAME_PIXELS {
-            return Err(Error::TooLarge("frame dimensions"));
+            return Err(ErrorKind::TooLarge(Limit::FrameSize).into());
         }
 
         let hicolor = header.is_hicolor();
@@ -369,7 +369,9 @@ impl FrameDecoder {
     /// chunk's sub-chunks.
     pub(crate) fn apply_side_chunks(&mut self, chunks: Chunks<'_>) -> Result<(), Error> {
         for chunk in chunks {
-            self.side_chunk(&chunk?)?;
+            let chunk = chunk?;
+            self.side_chunk(&chunk)
+                .map_err(|kind| Error::in_chunk(kind, &chunk))?;
         }
         Ok(())
     }
@@ -388,14 +390,16 @@ impl FrameDecoder {
     /// Decode the next frame from `chunks`, a VQFR chunk's sub-chunks.
     pub(crate) fn decode_chunks(&mut self, chunks: Chunks<'_>) -> Result<FrameRef<'_>, Error> {
         for chunk in chunks {
-            self.frame_chunk(&chunk?)?;
+            let chunk = chunk?;
+            self.frame_chunk(&chunk)
+                .map_err(|kind| Error::in_chunk(kind, &chunk))?;
         }
-        self.end_frame()
+        Ok(self.end_frame()?)
     }
 
     /// Apply one of a frame's sub-chunks: draw a pointer table or stream,
     /// or take in a codebook, codebook part, or palette.
-    pub(crate) fn frame_chunk(&mut self, chunk: &Chunk<'_>) -> Result<(), Error> {
+    pub(crate) fn frame_chunk(&mut self, chunk: &Chunk<'_>) -> Result<(), ErrorKind> {
         match &chunk.id {
             b"VPT0" => self.render_vpt(chunk.data),
             // VPTK marks a key frame and VPTD a delta one; Westwood's loader
@@ -416,11 +420,11 @@ impl FrameDecoder {
     }
 
     /// Finish the frame the sub-chunks drew, and borrow it.
-    pub(crate) fn end_frame(&mut self) -> Result<FrameRef<'_>, Error> {
+    pub(crate) fn end_frame(&mut self) -> Result<FrameRef<'_>, ErrorKind> {
         // a codebook completed by this frame's part takes effect only after
         // the frame is drawn
         if self.cbparts != 0 && self.parts_count >= self.cbparts {
-            self.swap_in_codebook_parts()?;
+            self.swap_parts()?;
         }
         Ok(self.frame())
     }
@@ -434,6 +438,10 @@ impl FrameDecoder {
     /// this called before decoding those frames. [`Frames`](crate::Frames)
     /// does that for them.
     pub fn swap_in_codebook_parts(&mut self) -> Result<(), Error> {
+        Ok(self.swap_parts()?)
+    }
+
+    fn swap_parts(&mut self) -> Result<(), ErrorKind> {
         if self.parts_count == 0 {
             return Ok(());
         }
@@ -449,7 +457,7 @@ impl FrameDecoder {
 
     /// Handle the non-pointer sub-chunks: codebooks, codebook parts, and
     /// palettes. Anything unrecognized is skipped.
-    fn side_chunk(&mut self, chunk: &Chunk<'_>) -> Result<(), Error> {
+    fn side_chunk(&mut self, chunk: &Chunk<'_>) -> Result<(), ErrorKind> {
         match &chunk.id {
             b"CBF0" => self.set_codebook(chunk.data.to_vec()),
             b"CBFZ" => {
@@ -474,9 +482,9 @@ impl FrameDecoder {
         self.blocks_x * self.blocks_y * 2
     }
 
-    fn set_codebook(&mut self, mut bytes: Vec<u8>) -> Result<(), Error> {
+    fn set_codebook(&mut self, mut bytes: Vec<u8>) -> Result<(), ErrorKind> {
         if bytes.len() > self.max_codebook_bytes {
-            return Err(Error::TooLarge("codebook"));
+            return Err(ErrorKind::TooLarge(Limit::Codebook));
         }
         // Westwood's compressor sometimes leaves 1-2 stray bytes after the
         // last entry (CBFZ chunks in retail HiColor movies); drop the partial
@@ -496,25 +504,25 @@ impl FrameDecoder {
         Ok(())
     }
 
-    fn stage_codebook_part(&mut self, chunk: &Chunk<'_>) -> Result<(), Error> {
+    fn stage_codebook_part(&mut self, chunk: &Chunk<'_>) -> Result<(), ErrorKind> {
         let compressed = chunk.id[3] == b'Z';
         if self.parts_count == 0 {
             self.parts.clear();
             self.parts_compressed = compressed;
         } else if compressed != self.parts_compressed {
-            return Err(Error::Video("mixed CBP0/CBPZ parts"));
+            return Err(ErrorKind::Video(VideoError::MixedCodebookParts));
         }
         if self.parts.len() + chunk.data.len() > self.max_codebook_bytes {
-            return Err(Error::TooLarge("codebook parts"));
+            return Err(ErrorKind::TooLarge(Limit::Codebook));
         }
         self.parts.extend_from_slice(chunk.data);
         self.parts_count += 1;
         Ok(())
     }
 
-    fn set_palette(&mut self, data: &[u8]) -> Result<(), Error> {
+    fn set_palette(&mut self, data: &[u8]) -> Result<(), ErrorKind> {
         if !data.len().is_multiple_of(3) || data.len() > 256 * 3 {
-            return Err(Error::Video("palette size"));
+            return Err(ErrorKind::Video(VideoError::PaletteSize));
         }
         self.palette = data
             .as_chunks::<3>()
@@ -543,12 +551,12 @@ impl FrameDecoder {
     }
 
     /// Draw a full 8-bit frame from a (decompressed) VPT? pointer table.
-    fn render_vpt(&mut self, table: &[u8]) -> Result<(), Error> {
+    fn render_vpt(&mut self, table: &[u8]) -> Result<(), ErrorKind> {
         if self.hicolor {
-            return Err(Error::Video("VPT? pointer table in a HiColor movie"));
+            return Err(ErrorKind::Video(VideoError::WrongPointerFormat));
         }
         if table.len() != self.blocks_x * self.blocks_y * 2 {
-            return Err(Error::Video("pointer table size mismatch"));
+            return Err(ErrorKind::Video(VideoError::PointerTableSize));
         }
         // 8-bit movies use 4x2 blocks; 4x4 covers the rest seen in the wild
         match (self.block_w, self.block_h) {
@@ -562,7 +570,7 @@ impl FrameDecoder {
     fn render_vpt_with<const BW: usize, const BH: usize>(
         &mut self,
         table: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<(), ErrorKind> {
         let blocks = self.blocks_x * self.blocks_y;
         for by in 0..self.blocks_y {
             for bx in 0..self.blocks_x {
@@ -597,9 +605,9 @@ impl FrameDecoder {
 
     /// Apply a (decompressed) HiColor VPTR command stream to the previous
     /// frame. Commands walk the frame's blocks row-major.
-    fn render_vptr(&mut self, stream: &[u8]) -> Result<(), Error> {
+    fn render_vptr(&mut self, stream: &[u8]) -> Result<(), ErrorKind> {
         if !self.hicolor {
-            return Err(Error::Video("VPTR pointer stream in an 8-bit movie"));
+            return Err(ErrorKind::Video(VideoError::WrongPointerFormat));
         }
         // every known HiColor movie uses 4x2 or 4x4 blocks
         match (self.block_w, self.block_h) {
@@ -613,13 +621,13 @@ impl FrameDecoder {
     fn render_vptr_with<const BW: usize, const BH: usize>(
         &mut self,
         stream: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<(), ErrorKind> {
         let mut pos = 0usize; // current block, row-major
         let mut sp = 0;
         while sp < stream.len() {
             let val = match stream.get(sp..sp + 2) {
                 Some(b) => u16::from_le_bytes([b[0], b[1]]),
-                None => return Err(Error::Video("dangling byte in pointer stream")),
+                None => return Err(ErrorKind::Video(VideoError::TruncatedPointerStream)),
             };
             sp += 2;
 
@@ -640,7 +648,7 @@ impl FrameDecoder {
                     for _ in 0..run_count * 2 {
                         let index = *stream
                             .get(sp)
-                            .ok_or(Error::Video("truncated pointer stream"))?;
+                            .ok_or(ErrorKind::Video(VideoError::TruncatedPointerStream))?;
                         sp += 1;
                         self.write_block16::<BW, BH>(&mut pos, usize::from(index), false)?;
                     }
@@ -655,14 +663,14 @@ impl FrameDecoder {
                 0b101 | 0b110 => {
                     let count = *stream
                         .get(sp)
-                        .ok_or(Error::Video("truncated pointer stream"))?;
+                        .ok_or(ErrorKind::Video(VideoError::TruncatedPointerStream))?;
                     sp += 1;
                     let alpha = val >> 13 == 0b110;
                     for _ in 0..count {
                         self.write_block16::<BW, BH>(&mut pos, usize::from(val & 0x1fff), alpha)?;
                     }
                 }
-                _ => return Err(Error::Video("unknown pointer stream command")),
+                _ => return Err(ErrorKind::Video(VideoError::UnknownPointerCommand)),
             }
         }
         Ok(())
@@ -677,10 +685,10 @@ impl FrameDecoder {
         pos: &mut usize,
         index: usize,
         alpha_skip: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ErrorKind> {
         let (bw, bh) = self.block_size::<BW, BH>();
         if *pos >= self.blocks_x * self.blocks_y {
-            return Err(Error::Video("pointer stream writes past the frame"));
+            return Err(ErrorKind::Video(VideoError::PointerStreamOverrun));
         }
         let entry = bw * bh;
         let Some(src) = self.codebook16.get(index * entry..(index + 1) * entry) else {
@@ -716,13 +724,13 @@ impl FrameDecoder {
         bx: usize,
         by: usize,
         index: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ErrorKind> {
         let (bw, bh) = self.block_size::<BW, BH>();
         let entry = bw * bh;
         let src = self
             .codebook8
             .get(index * entry..(index + 1) * entry)
-            .ok_or(Error::Video("block index outside the codebook"))?;
+            .ok_or(ErrorKind::Video(VideoError::BlockIndexOutOfRange))?;
         let dst = by * bh * self.width + bx * bw;
         for (row, src) in src.chunks_exact(bw).enumerate() {
             let at = dst + row * self.width;
@@ -987,8 +995,10 @@ mod tests {
 
         let table = [0u8, 1, 0, 0, 0, 0, 0, 0]; // block 1 wants entry 1
         assert_eq!(
-            decoder.decode_frame(&chunk("VPT0", &table)),
-            Err(Error::Video("block index outside the codebook"))
+            decoder
+                .decode_frame(&chunk("VPT0", &table))
+                .map_err(|e| e.kind()),
+            Err(ErrorKind::Video(VideoError::BlockIndexOutOfRange))
         );
     }
 
@@ -1001,8 +1011,8 @@ mod tests {
         let mut vqfr = chunk("CBF0", &codebook);
         vqfr.extend(chunk("VPT0", &table));
         assert_eq!(
-            decoder.decode_frame(&vqfr),
-            Err(Error::Video("block index outside the codebook"))
+            decoder.decode_frame(&vqfr).map_err(|e| e.kind()),
+            Err(ErrorKind::Video(VideoError::BlockIndexOutOfRange))
         );
     }
 
@@ -1043,8 +1053,10 @@ mod tests {
         let mut stream = 0b000_1111111111111u16.to_le_bytes().repeat(600_000);
         stream.extend(0b011_0000000000000u16.to_le_bytes());
         assert_eq!(
-            decoder.decode_frame(&chunk("VPTR", &stream)),
-            Err(Error::Video("pointer stream writes past the frame"))
+            decoder
+                .decode_frame(&chunk("VPTR", &stream))
+                .map_err(|e| e.kind()),
+            Err(ErrorKind::Video(VideoError::PointerStreamOverrun))
         );
     }
 
@@ -1053,8 +1065,10 @@ mod tests {
         let mut decoder = FrameDecoder::new(&hicolor_header()).unwrap();
         let stream = (0b111_0000000000000u16).to_le_bytes();
         assert_eq!(
-            decoder.decode_frame(&chunk("VPTR", &stream)),
-            Err(Error::Video("unknown pointer stream command"))
+            decoder
+                .decode_frame(&chunk("VPTR", &stream))
+                .map_err(|e| e.kind()),
+            Err(ErrorKind::Video(VideoError::UnknownPointerCommand))
         );
     }
 

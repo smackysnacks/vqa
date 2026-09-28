@@ -68,7 +68,7 @@ fn decode(data: &[u8]) -> Decoded {
                     }
                 }
             },
-            Err(e) => video_error = Some(format!("{e:?}")),
+            Err(e) => video_error = Some(e.to_string()),
         }
         count += 1;
     }
@@ -80,7 +80,7 @@ fn decode(data: &[u8]) -> Decoded {
     let mut audio_error = None;
     while let Some(result) = chunks.next_into(&mut samples) {
         if let Err(e) = result {
-            audio_error = Some(format!("{e:?}"));
+            audio_error = Some(e.to_string());
         }
     }
     let audio = samples
@@ -112,10 +112,10 @@ type Golden = (
 /// The decoded output of every movie in tests/samples.txt.
 #[rustfmt::skip]
 const GOLDEN: &[Golden] = &[
-    ("fate/ws_snd.vqa", 10, 0xbaebfbb984fa5121, Some("Parse"), 40639, 0x24ac094ac484a97b, Some("Parse")),
-    ("fate/small-cut-v3.vqa", 11, 0x2900d8658e24f3db, Some("Parse"), 17640, 0xe9c1600e5447816f, Some("Parse")),
-    ("fate/cc-demo1-partial.vqa", 38, 0x0f0a5d84bf5d2375, Some("Parse"), 68354, 0x9fa3569e19bf7b37, Some("Parse")),
-    ("td/cc-demo1.vqa", 417, 0x4bb73ad2d4627d52, Some("Parse"), 625484, 0x93a6601fd612ed00, Some("Parse")),
+    ("fate/ws_snd.vqa", 10, 0xbaebfbb984fa5121, Some("unexpected end of data (frame 10, VQFR chunk at offset 0x1732e)"), 40639, 0x24ac094ac484a97b, Some("unexpected end of data (VQFR chunk at offset 0x1732e)")),
+    ("fate/small-cut-v3.vqa", 11, 0x2900d8658e24f3db, Some("unexpected end of data (frame 11, VQFR chunk at offset 0x15d5c)"), 17640, 0xe9c1600e5447816f, Some("unexpected end of data (VQFR chunk at offset 0x15d5c)")),
+    ("fate/cc-demo1-partial.vqa", 38, 0x0f0a5d84bf5d2375, Some("unexpected end of data (frame 38, VQFR chunk at offset 0x3fe56)"), 68354, 0x9fa3569e19bf7b37, Some("unexpected end of data (VQFR chunk at offset 0x3fe56)")),
+    ("td/cc-demo1.vqa", 417, 0x4bb73ad2d4627d52, Some("unexpected end of data (frame 417, VQFR chunk at offset 0x363b92)"), 625484, 0x93a6601fd612ed00, Some("unexpected end of data (VQFR chunk at offset 0x363b92)")),
     ("td/NOD1PRE.VQA", 32, 0x52fd085d87e77402, None, 58064, 0x794ccddc9d9d9467, None),
     ("td/DINO.VQA", 116, 0x83cb6ad907b824ae, None, 181544, 0x3e2f978aa85abeab, None),
     ("td/SPYCRASH.VQA", 255, 0xc37832321f208dbf, None, 385874, 0xaa074c21c0a1d29e, None),

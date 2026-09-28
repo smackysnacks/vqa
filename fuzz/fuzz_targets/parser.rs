@@ -8,8 +8,17 @@ use vqa::*;
 /// payload in `input`, the bytes the walk's offsets count from.
 fn walk(input: &[u8], chunks: Chunks<'_>, depth: usize) {
     for chunk in chunks {
-        let Ok(chunk) = chunk else {
-            return;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                // an error points into the input, at a chunk ID if it has one
+                let offset = e.offset().expect("a chunk walk error has an offset");
+                assert!(offset < input.len());
+                if let Some(id) = e.chunk() {
+                    assert_eq!(&input[offset..][..4], &id);
+                }
+                return;
+            }
         };
         assert_eq!(&input[chunk.offset..][..4], &chunk.id);
         assert!(chunk.id.iter().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()));
@@ -62,6 +71,13 @@ fuzz_target!(|data: &[u8]| {
             for n in [0, 3, 15] {
                 let mut skipping = vqa.frames().expect("frames() succeeded above");
                 assert_eq!(skipping.nth(n).as_ref(), frames.get(n));
+            }
+            // an error names the frame it ended, and points into the file
+            if let Some(Err(e)) = frames.last() {
+                assert_eq!(e.frame(), Some(frames.len() - 1));
+                if let Some(offset) = e.offset() {
+                    assert!(offset < data.len());
+                }
             }
             if frames.len() > 2 {
                 let mut original = vqa.frames().expect("frames() succeeded above");

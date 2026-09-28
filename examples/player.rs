@@ -207,9 +207,10 @@ fn main() {
                     }
                     next_frame += 1;
                 }
-                // a damaged movie plays up to the bad frame
+                // a damaged movie plays up to the bad frame, which the
+                // error names
                 Some(Err(e)) => {
-                    eprintln!("warning: video stops at frame {next_frame}: {e}");
+                    eprintln!("warning: video stops early: {e}");
                     video_done = true;
                 }
                 None => video_done = true,

@@ -18,8 +18,10 @@ pub enum Mode {
     Relative,
 }
 
-/// Errors produced by [`decompress`] on malformed streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Errors produced by [`decompress`] on malformed streams. New kinds may be
+/// added in minor releases.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LcwError {
     /// The stream ended in the middle of a command.
     Truncated,

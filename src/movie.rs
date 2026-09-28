@@ -4,12 +4,29 @@
 
 use crate::audio::{CodecState, decompress_into, westwood};
 use crate::chunk::{Chunk, Chunks};
-use crate::error::Error;
+use crate::error::{Error, ErrorKind, Limit};
 use crate::header::{FrameInfo, VQAHeader, VQAVersion};
 use crate::video::{Frame, FrameDecoder, FrameRef};
 
 /// The most samples [`VQA::decode_audio`] collects.
 const MAX_SOUNDTRACK_SAMPLES: usize = 1 << 26;
+
+/// Where the VQHD chunk starts: after the FORM chunk header and the WVQA
+/// signature.
+const VQHD_OFFSET: usize = 12;
+
+/// The VQHD chunk's ID and size.
+const VQHD_START: &[u8; 8] = b"VQHD\0\0\0\x2a";
+
+/// Whether `start`, shorter than the FORM chunk header and the WVQA
+/// signature, could be the start of them: a file cut short inside them.
+fn is_cut_off_form(start: &[u8]) -> bool {
+    let matches = |at: usize, want: &[u8]| {
+        let have = start.get(at..).unwrap_or_default();
+        want.iter().zip(have).all(|(w, h)| w == h)
+    };
+    !start.is_empty() && matches(0, b"FORM") && matches(8, b"WVQA")
+}
 
 /// A parsed VQA movie, borrowing the file's bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,21 +54,35 @@ impl<'a> VQA<'a> {
     pub fn parse(buffer: &'a [u8]) -> Result<VQA<'a>, Error> {
         // the FORM chunk's size is not trusted: v1 movies store less than
         // the file holds, so everything after the signature is walked
-        let (form, rest) = buffer.split_first_chunk::<12>().ok_or(Error::Parse)?;
-        let (form_id, form) = form.split_at(4);
-        let (form_size, signature) = form.split_at(4);
-        if form_id != b"FORM" || signature != b"WVQA" {
-            return Err(Error::Parse);
+        let Some((form, rest)) = buffer.split_first_chunk::<12>() else {
+            return Err(Error::from(if is_cut_off_form(buffer) {
+                ErrorKind::Truncated
+            } else {
+                ErrorKind::NotVqa
+            }));
+        };
+        if &form[..4] != b"FORM" || &form[8..] != b"WVQA" {
+            return Err(ErrorKind::NotVqa.into());
         }
-        let form_size = u32::from_be_bytes(form_size.try_into().expect("four bytes"));
+        let form_size = u32::from_be_bytes(form[4..8].try_into().expect("four bytes"));
 
-        let mut chunks = Chunks::at(rest, 12);
-        let vqhd = chunks.next().ok_or(Error::Parse)??;
-        if &vqhd.id != b"VQHD" {
-            return Err(Error::Parse);
+        // the VQHD chunk, which always holds 42 bytes
+        let vqhd_error = |kind| Error::at(kind, Some(*b"VQHD"), VQHD_OFFSET);
+        let Some((vqhd, rest)) = rest.split_first_chunk::<8>() else {
+            return Err(if VQHD_START.starts_with(rest) {
+                vqhd_error(ErrorKind::Truncated)
+            } else {
+                Error::at(ErrorKind::InvalidHeader, None, VQHD_OFFSET)
+            });
+        };
+        if vqhd != VQHD_START {
+            return Err(vqhd_error(ErrorKind::InvalidHeader));
         }
-        let header = VQAHeader::parse(vqhd.data)?;
-        let (body, body_offset) = chunks.remaining();
+        let (vqhd, body) = rest
+            .split_first_chunk::<42>()
+            .ok_or_else(|| vqhd_error(ErrorKind::Truncated))?;
+        let header = VQAHeader::parse(vqhd).map_err(|e| vqhd_error(e.kind()))?;
+        let body_offset = buffer.len() - body.len();
 
         // the frame index (FINF) and codebook schedule (CINF) sit between
         // the header and the first frame's data, possibly behind chunks we
@@ -95,7 +126,9 @@ impl<'a> VQA<'a> {
     pub fn frames(&self) -> Result<Frames<'a>, Error> {
         Ok(Frames {
             chunks: self.chunks(),
-            decoder: FrameDecoder::new(&self.header)?,
+            // the header is what's wrong with the movie
+            decoder: FrameDecoder::new(&self.header)
+                .map_err(|e| Error::at(e.kind(), Some(*b"VQHD"), VQHD_OFFSET))?,
             // with no part count in the header, codebook parts complete
             // where the CINF schedule starts a codebook
             codebook_schedule: if self.header.cbparts == 0 {
@@ -113,7 +146,7 @@ impl<'a> VQA<'a> {
     /// Hz): IMA ADPCM (`SND2`) in its per-version stereo layouts, Westwood
     /// ADPCM (`SND1`), and raw PCM (`SND0`). Fails on the first malformed
     /// chunk, where [`VQA::audio_chunks`] keeps the sound before it, and
-    /// with [`Error::TooLarge`] past 2^26 samples (over 25 minutes of stereo
+    /// with [`ErrorKind::TooLarge`] past 2^26 samples (over 25 minutes of stereo
     /// sound at 22050 Hz): Westwood ADPCM can expand 64-fold, so a small
     /// crafted file could ask for gigabytes. `audio_chunks` holds only one
     /// chunk at a time, and has no such limit.
@@ -127,7 +160,7 @@ impl<'a> VQA<'a> {
         while let Some(result) = chunks.next_into(&mut samples) {
             result?;
             if samples.len() > max_samples {
-                return Err(Error::TooLarge("soundtrack"));
+                return Err(ErrorKind::TooLarge(Limit::Soundtrack).into());
             }
         }
         Ok(samples)
@@ -319,6 +352,7 @@ impl<'a> Frames<'a> {
         if self.done {
             return None;
         }
+        let frame = self.frame;
         // a codebook the CINF schedule starts at this frame takes over
         // before any of the frame's chunks are read, in either layout
         let data = match self.start_frame().map(|()| self.next_frame_data()) {
@@ -326,19 +360,25 @@ impl<'a> Frames<'a> {
             Ok(Some(Ok(data))) => data,
             Ok(Some(Err(e))) | Err(e) => {
                 self.done = true;
-                return Some(Err(e));
+                return Some(Err(e.in_frame(frame)));
             }
         };
         self.frame += 1;
+        // an error with no place of its own, such as a codebook swap after
+        // the frame's last chunk, happened in the frame's chunk
         let result = match data {
-            FrameData::Container(chunk) => self.decoder.decode_chunks(chunk.sub_chunks()),
-            FrameData::Table(chunk) => self
+            FrameData::Container(chunk) => self
                 .decoder
-                .frame_chunk(&chunk)
-                .and_then(|()| self.decoder.end_frame()),
+                .decode_chunks(chunk.sub_chunks())
+                .map_err(|e| e.or_in(&chunk)),
+            FrameData::Table(chunk) => match self.decoder.frame_chunk(&chunk) {
+                Ok(()) => self.decoder.end_frame(),
+                Err(kind) => Err(kind),
+            }
+            .map_err(|kind| Error::in_chunk(kind, &chunk)),
         };
         self.done = result.is_err();
-        Some(result)
+        Some(result.map_err(|e| e.in_frame(frame)))
     }
 
     /// Walk the chunks up to the next frame, applying VQFL refreshes and
@@ -357,9 +397,10 @@ impl<'a> Frames<'a> {
                 b"VPT0" | b"VPTZ" | b"VPTK" | b"VPTD" => {
                     return Some(Ok(FrameData::Table(chunk)));
                 }
-                b"CBF0" | b"CBFZ" | b"CBP0" | b"CBPZ" | b"CPL0" | b"CPLZ" => {
-                    self.decoder.frame_chunk(&chunk)
-                }
+                b"CBF0" | b"CBFZ" | b"CBP0" | b"CBPZ" | b"CPL0" | b"CPLZ" => self
+                    .decoder
+                    .frame_chunk(&chunk)
+                    .map_err(|kind| Error::in_chunk(kind, &chunk)),
                 _ => Ok(()),
             };
             if let Err(e) = applied {
@@ -491,7 +532,7 @@ mod tests {
         assert_eq!(vqa.decode_audio_up_to(18).map(|s| s.len()), Ok(18));
         assert_eq!(
             vqa.decode_audio_up_to(17),
-            Err(Error::TooLarge("soundtrack"))
+            Err(ErrorKind::TooLarge(Limit::Soundtrack).into())
         );
     }
 
