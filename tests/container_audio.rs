@@ -250,11 +250,24 @@ fn parse_rejects_a_vqhd_size_other_than_42() {
     let long = form(&[chunk(b"VQHD", &long_payload)]);
     assert_eq!(kind(VQA::parse(&long)), Err(ErrorKind::InvalidHeader));
 
-    // and something else where VQHD should be
-    let file = form(&[chunk(b"FINF", &[0; 4])]);
-    assert_eq!(kind(VQA::parse(&file)), Err(ErrorKind::InvalidHeader));
-    let file = form(&[b"vqhd".to_vec()]);
-    assert_eq!(kind(VQA::parse(&file)), Err(ErrorKind::InvalidHeader));
+    // and something else where VQHD should be, named when it has a valid
+    // chunk ID
+    let invalid = |id| (ErrorKind::InvalidHeader, id, Some(12));
+    for (file, id) in [
+        (form(&[chunk(b"FINF", &[0; 4])]), Some(*b"FINF")),
+        (form(&[b"FINF".to_vec()]), Some(*b"FINF")),
+        (form(&[b"vqhd\0\0\0\x2a".to_vec()]), None),
+        (form(&[b"vqhd".to_vec()]), None),
+        (form(&[b"VX".to_vec()]), None),
+    ] {
+        let error = VQA::parse(&file).unwrap_err();
+        assert_eq!(
+            (error.kind(), error.chunk(), error.offset()),
+            invalid(id),
+            "{:?}",
+            &file[12..]
+        );
+    }
 }
 
 #[test]
@@ -268,10 +281,20 @@ fn parse_rejects_a_truncated_vqhd() {
         (error.kind(), error.chunk(), error.offset()),
         (ErrorKind::Truncated, Some(*b"VQHD"), Some(12))
     );
-    // or inside its chunk header
-    for len in [12, 14, 19] {
+    // or inside its chunk header, naming it once its ID is whole
+    for (len, id) in [
+        (19, Some(*b"VQHD")),
+        (16, Some(*b"VQHD")),
+        (14, None),
+        (12, None),
+    ] {
         file.truncate(len);
-        assert_eq!(kind(VQA::parse(&file)), Err(ErrorKind::Truncated), "{len}");
+        let error = VQA::parse(&file).unwrap_err();
+        assert_eq!(
+            (error.kind(), error.chunk(), error.offset()),
+            (ErrorKind::Truncated, id, Some(12)),
+            "{len}"
+        );
     }
 }
 
@@ -282,9 +305,10 @@ fn parse_rejects_versions_0_and_4() {
         let mut payload = vqhd(&header_8bit());
         payload[..2].copy_from_slice(&version.to_le_bytes());
         let file = form(&[chunk(b"VQHD", &payload)]);
+        let error = VQA::parse(&file).unwrap_err();
         assert_eq!(
-            kind(VQA::parse(&file)),
-            Err(ErrorKind::InvalidHeader),
+            (error.kind(), error.chunk(), error.offset()),
+            (ErrorKind::InvalidHeader, Some(*b"VQHD"), Some(12)),
             "version {version}"
         );
     }

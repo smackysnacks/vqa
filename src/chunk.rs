@@ -111,11 +111,7 @@ impl<'a> Chunks<'a> {
 
     fn next_chunk(&mut self) -> Result<Chunk<'a>, Error> {
         let input = self.input;
-        let id_bytes = &input[..input.len().min(4)];
-        if !id_bytes
-            .iter()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-        {
+        if !is_chunk_id(&input[..input.len().min(4)]) {
             return Err(Error::at(ErrorKind::InvalidChunk, None, self.offset));
         }
         // past the end of a whole payload the data is corrupt; past the end
@@ -148,6 +144,13 @@ impl<'a> Chunks<'a> {
         self.input = rest;
         Ok(chunk)
     }
+}
+
+/// Whether `id` is made of what chunk IDs are made of: uppercase ASCII
+/// letters and digits.
+pub(crate) fn is_chunk_id(id: &[u8]) -> bool {
+    id.iter()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 impl<'a> Iterator for Chunks<'a> {

@@ -3,7 +3,7 @@
 //! chunks, the FINF transforms, or the per-version stereo layouts.
 
 use crate::audio::{CodecState, decompress_into, westwood};
-use crate::chunk::{Chunk, Chunks};
+use crate::chunk::{Chunk, Chunks, is_chunk_id};
 use crate::error::{Error, ErrorKind, Limit};
 use crate::header::{FrameInfo, VQAHeader, VQAVersion};
 use crate::video::{Frame, FrameDecoder, FrameRef};
@@ -61,8 +61,9 @@ impl<'a> VQA<'a> {
     ///   signature, isn't 42 bytes long, or holds a version other than 1, 2
     ///   or 3
     ///
-    /// Errors in the header name the `VQHD` chunk at offset 12. The chunks
-    /// after it are read only as they are walked.
+    /// Errors in the header point at offset 12, where its chunk starts, and
+    /// name the chunk found there (`VQHD`, or another) when it has a whole,
+    /// valid ID. The chunks after it are read only as they are walked.
     pub fn parse(buffer: &'a [u8]) -> Result<VQA<'a>, Error> {
         // the FORM chunk's size is not trusted: v1 movies store less than
         // the file holds, so everything after the signature is walked
@@ -78,22 +79,25 @@ impl<'a> VQA<'a> {
         }
         let form_size = u32::from_be_bytes(form[4..8].try_into().expect("four bytes"));
 
-        // the VQHD chunk, which always holds 42 bytes
-        let vqhd_error = |kind| Error::at(kind, Some(*b"VQHD"), VQHD_OFFSET);
+        // the VQHD chunk, which always holds 42 bytes. An error names the
+        // chunk found there, if a whole, valid ID is
+        let found = rest.first_chunk::<4>().copied();
+        let found = found.filter(|id| is_chunk_id(id));
+        let header_error = |kind| Error::at(kind, found, VQHD_OFFSET);
         let Some((vqhd, rest)) = rest.split_first_chunk::<8>() else {
-            return Err(if VQHD_START.starts_with(rest) {
-                vqhd_error(ErrorKind::Truncated)
+            return Err(header_error(if VQHD_START.starts_with(rest) {
+                ErrorKind::Truncated
             } else {
-                Error::at(ErrorKind::InvalidHeader, None, VQHD_OFFSET)
-            });
+                ErrorKind::InvalidHeader
+            }));
         };
         if vqhd != VQHD_START {
-            return Err(vqhd_error(ErrorKind::InvalidHeader));
+            return Err(header_error(ErrorKind::InvalidHeader));
         }
         let (vqhd, body) = rest
             .split_first_chunk::<42>()
-            .ok_or_else(|| vqhd_error(ErrorKind::Truncated))?;
-        let header = VQAHeader::parse(vqhd).map_err(|e| vqhd_error(e.kind()))?;
+            .ok_or_else(|| header_error(ErrorKind::Truncated))?;
+        let header = VQAHeader::parse(vqhd).map_err(|e| header_error(e.kind()))?;
         let body_offset = buffer.len() - body.len();
 
         // the frame index (FINF) and codebook schedule (CINF) sit between
