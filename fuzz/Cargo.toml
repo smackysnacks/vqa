@@ -40,3 +40,10 @@ path = "fuzz_targets/snd1.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "video"
+path = "fuzz_targets/video.rs"
+test = false
+doc = false
+bench = false
