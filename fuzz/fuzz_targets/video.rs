@@ -12,17 +12,17 @@ const IDS: [&[u8; 4]; 8] = [
 ];
 
 fuzz_target!(|data: &[u8]| {
-    // Three bytes pick the movie: version and pixel format, block size,
+    // Four bytes pick the movie: version and pixel format, block size,
     // frame size and codebook limit. The rest is a list of records - a kind
     // byte, a little-endian u16 length, and that many bytes - each of which
     // becomes one frame of a single sub-chunk. The decoder must agree with
     // the plain per-pixel renderer below on every frame: the error, if any,
     // and all the pixels, including those a failed chunk leaves drawn, and
     // the pixels' RGB conversions.
-    let Some((&[format, size, dims], mut rest)) = data.split_first_chunk::<3>() else {
+    let Some((&[format, size, dims, wide], mut rest)) = data.split_first_chunk::<4>() else {
         return;
     };
-    let header = header(format, size, dims);
+    let header = header(format, size, dims, wide);
     let mut decoder = FrameDecoder::new(&header).expect("the header is valid");
     let mut reference = Reference::new(&header);
 
@@ -60,14 +60,17 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-/// The movie `format`, `size` and `dims` pick.
-fn header(format: u8, size: u8, dims: u8) -> VQAHeader {
+/// The movie `format`, `size`, `dims` and `wide` pick.
+fn header(format: u8, size: u8, dims: u8, wide: u8) -> VQAHeader {
     let (block_width, block_height) = match size {
         0..=95 => (4, 2),
         96..=191 => (4, 4),
         _ => (1 + (size & 7), 1 + (size >> 3 & 7)),
     };
-    let (blocks_x, blocks_y) = (u16::from(1 + (dims & 15)), u16::from(1 + (dims >> 4)));
+    // rows of up to 64 blocks, so that the decoder's vector paths, which
+    // take 16 blocks at a time, run with and without leftovers
+    let blocks_x = u16::from(1 + (dims & 15) + 16 * (wide & 3));
+    let blocks_y = u16::from(1 + (dims >> 4));
     // some frames a pixel or two wider or taller than their blocks cover
     let (extra_x, extra_y) = (u16::from(format >> 4 & 3), u16::from(format >> 6));
     VQAHeader {
