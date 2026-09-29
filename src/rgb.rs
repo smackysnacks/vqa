@@ -9,18 +9,23 @@
 //! into a function call.
 
 use fearless_simd::prelude::*;
-use fearless_simd::{Level, dispatch, u8x16, u16x16, u32x8};
+use fearless_simd::{Level, dispatch, u8x32, u16x16, u32x8};
 
 /// `RGB_SHUFFLE[block][channel]` interleaves three 16-lane planes (R, G, B)
-/// into 48 bytes of RGB888, 16 bytes per `block`: each output byte of the
-/// channel it holds takes that plane's lane for its pixel, and 0x80 - out
-/// of range, so it shuffles in a zero - marks the bytes of the other two
-/// channels.
-const RGB_SHUFFLE: [[[u8; 16]; 3]; 3] = {
-    let mut table = [[[0x80; 16]; 3]; 3];
+/// into 48 bytes of RGB888, 16 bytes per `block`: the first mask shuffles
+/// the channel's plane so that each output byte of that channel takes the
+/// plane's lane for its pixel, and the second keeps those bytes (0xff) and
+/// clears the other two channels' (0). Clearing them with a mask, rather
+/// than with out-of-range shuffle indices, works on every SIMD level: some
+/// wrap out-of-range indices instead of zeroing. Each mask is repeated for
+/// the two 16-byte blocks of a 32-byte vector.
+const RGB_SHUFFLE: [[[[u8; 32]; 2]; 3]; 3] = {
+    let mut table = [[[[0; 32]; 2]; 3]; 3];
     let mut byte = 0;
-    while byte < 48 {
-        table[byte / 16][byte % 3][byte % 16] = (byte / 3) as u8;
+    while byte < 96 {
+        let (block, channel, lane) = (byte % 48 / 16, byte % 3, byte / 48 * 16 + byte % 16);
+        table[block][channel][0][lane] = (byte % 48 / 3) as u8;
+        table[block][channel][1][lane] = 0xff;
         byte += 1;
     }
     table
@@ -54,34 +59,75 @@ fn hicolor_scalar(pixels: &[u16], out: &mut [u8]) {
     }
 }
 
-/// 16 pixels per iteration: expand the channels on 16-bit lanes, narrow
-/// each to a byte plane, then shuffle the planes together.
+/// 32 pixels per iteration: expand the channels on 16-bit lanes, narrow
+/// each to a 32-byte plane, then shuffle the planes together. The shuffles
+/// work within each 16-byte block, so the planes' two halves - pixels 0-15
+/// and 16-31 - make two 48-byte runs of RGB888 side by side.
 #[inline(always)]
 fn hicolor_kernel<S: Simd>(simd: S, pixels: &[u16], out: &mut [u8]) {
-    let (src, src_rest) = pixels.as_chunks::<16>();
-    let (dst, dst_rest) = out.as_chunks_mut::<48>();
+    let (src, src_rest) = pixels.as_chunks::<32>();
+    let (dst, dst_rest) = out.as_chunks_mut::<96>();
+    // On wasm32 the masks are kept opaque to the compiler: specialized to
+    // them, the shuffles run half again as slowly under V8 (105 us for a
+    // 640x400 frame against 70)
+    #[cfg(target_arch = "wasm32")]
+    let table = std::hint::black_box(&RGB_SHUFFLE);
+    #[cfg(not(target_arch = "wasm32"))]
+    let table = &RGB_SHUFFLE;
+    let mut masks = [[[u8x32::splat(simd, 0); 2]; 3]; 3];
+    for (block, table) in masks.iter_mut().zip(table) {
+        for (channel, table) in block.iter_mut().zip(table) {
+            for (mask, table) in channel.iter_mut().zip(table) {
+                *mask = u8x32::from_slice(simd, table);
+            }
+        }
+    }
     for (pixels, out) in src.iter().zip(dst) {
-        let p = u16x16::from_slice(simd, pixels);
+        let (p0, p1) = pixels.split_at(16);
+        let (p0, p1) = (u16x16::from_slice(simd, p0), u16x16::from_slice(simd, p1));
         // scale5 per channel: the channel's bits moved to 3..=7, and its
         // top three bits to 0..=2
-        let r = to_bytes(((p >> 7) & 0xf8) | ((p >> 12) & 0x07));
-        let g = to_bytes(((p >> 2) & 0xf8) | ((p >> 7) & 0x07));
-        let b = to_bytes(((p << 3) & 0xf8) | ((p >> 2) & 0x07));
-        for (out, [mr, mg, mb]) in out.as_chunks_mut::<16>().0.iter_mut().zip(&RGB_SHUFFLE) {
-            let rgb = r.swizzle_dyn_precise(u8x16::from_slice(simd, mr))
-                | g.swizzle_dyn_precise(u8x16::from_slice(simd, mg))
-                | b.swizzle_dyn_precise(u8x16::from_slice(simd, mb));
-            rgb.store_slice(out);
+        let r = simd.narrow_u16x16(red(p0), red(p1));
+        let g = simd.narrow_u16x16(green(p0), green(p1));
+        let b = simd.narrow_u16x16(blue(p0), blue(p1));
+        let (first, second) = out.split_at_mut(48);
+        let blocks = first
+            .as_chunks_mut::<16>()
+            .0
+            .iter_mut()
+            .zip(second.as_chunks_mut::<16>().0);
+        for ((first, second), [mr, mg, mb]) in blocks.zip(masks) {
+            let rgb = channel_bytes(simd, r, mr)
+                | channel_bytes(simd, g, mg)
+                | channel_bytes(simd, b, mb);
+            let (lo, hi) = rgb.split();
+            lo.store_slice(first);
+            hi.store_slice(second);
         }
     }
     hicolor_scalar(src_rest, dst_rest);
 }
 
-/// Narrow 16 lanes holding byte values to bytes.
+/// A plane's bytes where one channel of RGB888 goes, per `pick` and
+/// `keep` (see [`RGB_SHUFFLE`]), and 0 elsewhere.
 #[inline(always)]
-fn to_bytes<S: Simd>(v: u16x16<S>) -> u8x16<S> {
-    let (lo, hi) = v.split();
-    lo.narrow(hi)
+fn channel_bytes<S: Simd>(simd: S, plane: u8x32<S>, [pick, keep]: [u8x32<S>; 2]) -> u8x32<S> {
+    simd.swizzle_dyn_within_blocks_u8x32(plane, pick) & keep
+}
+
+#[inline(always)]
+fn red<S: Simd>(p: u16x16<S>) -> u16x16<S> {
+    ((p >> 7) & 0xf8) | ((p >> 12) & 0x07)
+}
+
+#[inline(always)]
+fn green<S: Simd>(p: u16x16<S>) -> u16x16<S> {
+    ((p >> 2) & 0xf8) | ((p >> 7) & 0x07)
+}
+
+#[inline(always)]
+fn blue<S: Simd>(p: u16x16<S>) -> u16x16<S> {
+    ((p << 3) & 0xf8) | ((p >> 2) & 0x07)
 }
 
 /// Convert palette indices to RGB888; indices with no palette entry come
