@@ -7,6 +7,9 @@
 //! block each frame from a VPT? table; HiColor movies update the previous
 //! frame differentially with a VPTR/VPRZ command stream.
 
+use fearless_simd::prelude::*;
+use fearless_simd::{Level, dispatch, mask16x16, u8x16, u8x32, u16x16, u32x4, u64x2};
+
 use crate::chunk::{Chunk, Chunks};
 use crate::error::{Error, ErrorKind, Limit, VideoError};
 use crate::header::{VQAHeader, VQAVersion};
@@ -294,8 +297,11 @@ pub struct FrameDecoder {
     max_codebook_bytes: usize,
     /// parts making up one full codebook (0 = full codebooks only)
     cbparts: usize,
-    /// current codebook - 8-bit movies store palette indices...
+    /// current codebook - 8-bit movies store palette indices, the
+    /// codebook's `entries8` entries and then one solid-color entry per
+    /// color, which fill blocks draw...
     codebook8: Vec<u8>,
+    entries8: usize,
     /// ...HiColor movies 15-bit pixels
     codebook16: Vec<u16>,
     /// staged partial codebook data and how many parts are in
@@ -305,6 +311,10 @@ pub struct FrameDecoder {
     palette: Vec<[u8; 3]>,
     frame8: Vec<u8>,
     frame16: Vec<u16>,
+    /// the codebook entry each block of a row draws, as 8-bit drawing
+    /// works it out
+    sources: Vec<u32>,
+    level: Level,
 }
 
 impl FrameDecoder {
@@ -356,7 +366,12 @@ impl FrameDecoder {
             fill_sentinel: if block_h == 4 { 0xff } else { 0x0f },
             max_codebook_bytes,
             cbparts: usize::from(header.cbparts),
-            codebook8: Vec::new(),
+            codebook8: if hicolor {
+                Vec::new()
+            } else {
+                with_fill_entries(Vec::new(), block_w * block_h)
+            },
+            entries8: 0,
             codebook16: Vec::new(),
             parts: Vec::new(),
             parts_count: 0,
@@ -372,6 +387,12 @@ impl FrameDecoder {
             } else {
                 Vec::new()
             },
+            sources: if hicolor {
+                Vec::new()
+            } else {
+                vec![0; width / block_w]
+            },
+            level: Level::new(),
         })
     }
 
@@ -580,7 +601,8 @@ impl FrameDecoder {
                 .map(|&p| u16::from_le_bytes(p))
                 .collect();
         } else {
-            self.codebook8 = bytes;
+            self.entries8 = bytes.len() / entry_bytes;
+            self.codebook8 = with_fill_entries(bytes, entry_bytes);
         }
         Ok(())
     }
@@ -639,46 +661,69 @@ impl FrameDecoder {
         if table.len() != self.blocks_x * self.blocks_y * 2 {
             return Err(ErrorKind::Video(VideoError::PointerTableSize));
         }
+        if table.is_empty() {
+            return Ok(());
+        }
+        let level = self.level;
         // 8-bit movies use 4x2 blocks; 4x4 covers the rest seen in the wild
         match (self.block_w, self.block_h) {
-            (4, 2) => self.render_vpt_with::<4, 2>(table),
-            (4, 4) => self.render_vpt_with::<4, 4>(table),
-            _ => self.render_vpt_with::<0, 0>(table),
+            (4, 2) => dispatch!(level, simd => self.render_vpt_with::<_, 4, 2>(simd, table)),
+            (4, 4) => dispatch!(level, simd => self.render_vpt_with::<_, 4, 4>(simd, table)),
+            _ => dispatch!(level, simd => self.render_vpt_with::<_, 0, 0>(simd, table)),
         }
     }
 
+    /// Draw the frame a row of blocks at a time: first work out which
+    /// codebook entry each block of the row draws, then copy them in. A
+    /// block indexing past the codebook fails the frame, with the blocks
+    /// before it drawn.
     #[inline(always)]
-    fn render_vpt_with<const BW: usize, const BH: usize>(
+    fn render_vpt_with<S: Simd, const BW: usize, const BH: usize>(
         &mut self,
+        simd: S,
         table: &[u8],
     ) -> Result<(), ErrorKind> {
-        let blocks = self.blocks_x * self.blocks_y;
-        for by in 0..self.blocks_y {
-            for bx in 0..self.blocks_x {
-                let i = by * self.blocks_x + bx;
-                match self.version {
-                    // v1: interleaved 16-bit entries; 0xff flags a fill with
-                    // color 255-LoVal, indexes are stored premultiplied by 8
-                    VQAVersion::One => {
-                        let (lo, hi) = (table[i * 2], table[i * 2 + 1]);
-                        if hi == 0xff {
-                            self.fill_block::<BW, BH>(bx, by, 255 - lo);
-                        } else {
-                            let index = (usize::from(hi) << 8 | usize::from(lo)) / 8;
-                            self.copy_block8::<BW, BH>(bx, by, index)?;
-                        }
-                    }
-                    // v2: table split into a LoVal half and a HiVal half
-                    _ => {
-                        let (lo, hi) = (table[i], table[blocks + i]);
-                        if hi == self.fill_sentinel {
-                            self.fill_block::<BW, BH>(bx, by, lo);
-                        } else {
-                            let index = usize::from(hi) << 8 | usize::from(lo);
-                            self.copy_block8::<BW, BH>(bx, by, index)?;
-                        }
+        let (bw, bh) = self.block_size::<BW, BH>();
+        let (blocks_x, blocks) = (self.blocks_x, self.blocks_x * self.blocks_y);
+        let (entries, fill) = (self.entries8, self.fill_sentinel);
+        // without a SIMD level, vector code would only be emulated
+        let vector = !self.level.is_fallback();
+        let sources = &mut self.sources[..blocks_x];
+        let strips = self.frame8.chunks_exact_mut(self.width * bh);
+        for (by, strip) in strips.take(self.blocks_y).enumerate() {
+            let row = by * blocks_x;
+            let drawable = match self.version {
+                // v1: interleaved 16-bit entries
+                VQAVersion::One => {
+                    let words = &table[row * 2..][..blocks_x * 2];
+                    match vector {
+                        true => interleaved_sources(simd, words, entries, sources),
+                        false => interleaved_sources_scalar(words, entries, sources),
                     }
                 }
+                // v2: a LoVal half, then a HiVal half
+                _ => {
+                    let lo = &table[row..][..blocks_x];
+                    let hi = &table[blocks + row..][..blocks_x];
+                    match vector {
+                        true => split_sources(simd, lo, hi, fill, entries, sources),
+                        false => split_sources_scalar(lo, hi, fill, entries, sources),
+                    }
+                }
+            };
+            let sources = &sources[..drawable];
+            match (BW, BH, vector) {
+                (0, _, _) => draw_row_any(strip, self.width, bw, &self.codebook8, sources),
+                (4, 2, true) => {
+                    draw_row_simd::<_, 2>(simd, strip, self.width, &self.codebook8, sources);
+                }
+                (4, 4, true) => {
+                    draw_row_simd::<_, 4>(simd, strip, self.width, &self.codebook8, sources);
+                }
+                _ => draw_row::<BW, BH>(strip, self.width, &self.codebook8, sources),
+            }
+            if drawable < blocks_x {
+                return Err(ErrorKind::Video(VideoError::BlockIndexOutOfRange));
             }
         }
         Ok(())
@@ -798,39 +843,6 @@ impl FrameDecoder {
         Ok(())
     }
 
-    /// Copy codebook entry `index` into the 8-bit frame at block (bx, by).
-    #[inline(always)]
-    fn copy_block8<const BW: usize, const BH: usize>(
-        &mut self,
-        bx: usize,
-        by: usize,
-        index: usize,
-    ) -> Result<(), ErrorKind> {
-        let (bw, bh) = self.block_size::<BW, BH>();
-        let entry = bw * bh;
-        let src = self
-            .codebook8
-            .get(index * entry..(index + 1) * entry)
-            .ok_or(ErrorKind::Video(VideoError::BlockIndexOutOfRange))?;
-        let dst = by * bh * self.width + bx * bw;
-        for (row, src) in src.chunks_exact(bw).enumerate() {
-            let at = dst + row * self.width;
-            self.frame8[at..at + bw].copy_from_slice(src);
-        }
-        Ok(())
-    }
-
-    /// Fill block (bx, by) of the 8-bit frame with a solid color.
-    #[inline(always)]
-    fn fill_block<const BW: usize, const BH: usize>(&mut self, bx: usize, by: usize, color: u8) {
-        let (bw, bh) = self.block_size::<BW, BH>();
-        let dst = by * bh * self.width + bx * bw;
-        for row in 0..bh {
-            let at = dst + row * self.width;
-            self.frame8[at..at + bw].fill(color);
-        }
-    }
-
     /// The current frame, as the last VQFR chunk left it.
     fn frame(&self) -> FrameRef<'_> {
         FrameRef {
@@ -846,6 +858,238 @@ impl FrameDecoder {
                     palette: &self.palette,
                 }
             },
+        }
+    }
+}
+
+/// `codebook` followed by one solid-color entry of `entry` bytes per color,
+/// in color order.
+fn with_fill_entries(mut codebook: Vec<u8>, entry: usize) -> Vec<u8> {
+    codebook.reserve(256 * entry);
+    for color in 0..=255 {
+        codebook.extend(std::iter::repeat_n(color, entry));
+    }
+    codebook
+}
+
+// Where the blocks of a row of an 8-bit pointer table draw from: each
+// block's codebook entry, or for a fill block the solid-color entry of its
+// color after the codebook's `entries` own. Each gives how many of the
+// row's leading blocks can be drawn: all of them, or those before the first
+// that indexes past the codebook. The vector versions take 16 blocks at a
+// time, with no branch between fills and copies.
+
+/// The sources of a row of a v2 pointer table, from its LoVal (`lo`) and
+/// HiVal (`hi`) bytes. A HiVal of `fill` marks a fill with color LoVal.
+#[inline(always)]
+fn split_sources<S: Simd>(
+    simd: S,
+    lo: &[u8],
+    hi: &[u8],
+    fill: u8,
+    entries: usize,
+    out: &mut [u32],
+) -> usize {
+    let (lo_v, lo_rest) = lo.as_chunks::<16>();
+    let (hi_v, hi_rest) = hi.as_chunks::<16>();
+    let (out_v, out_rest) = out.as_chunks_mut::<16>();
+    // the codebook's size fits: it holds at most 0xffff entries
+    let entries_v = u16x16::splat(simd, entries as u16);
+    for (i, ((lo, hi), out)) in lo_v.iter().zip(hi_v).zip(out_v).enumerate() {
+        let (lo, hi) = (u8x16::from_slice(simd, lo), u8x16::from_slice(simd, hi));
+        let index: u16x16<S> = simd
+            .combine_u8x16(simd.zip_low_u8x16(lo, hi), simd.zip_high_u8x16(lo, hi))
+            .bitcast();
+        let is_fill = (index >> 8).simd_eq(u16x16::splat(simd, u16::from(fill)));
+        let is_bad = !is_fill & index.simd_ge(entries_v);
+        store_sources(simd, is_fill, index & 0xff, index, entries_v, out);
+        if is_bad.any_true() {
+            return i * 16 + is_bad.to_bitmask().trailing_zeros() as usize;
+        }
+    }
+    let done = lo_v.len() * 16;
+    done + split_sources_scalar(lo_rest, hi_rest, fill, entries, out_rest)
+}
+
+fn split_sources_scalar(lo: &[u8], hi: &[u8], fill: u8, entries: usize, out: &mut [u32]) -> usize {
+    for (i, ((&lo, &hi), out)) in lo.iter().zip(hi).zip(out).enumerate() {
+        let index = usize::from(hi) << 8 | usize::from(lo);
+        *out = match hi == fill {
+            true => entries + usize::from(lo),
+            false if index < entries => index,
+            false => return i,
+        } as u32;
+    }
+    lo.len()
+}
+
+/// The sources of a row of a v1 pointer table, from its little-endian
+/// words: a HiVal of 0xff marks a fill with color 255 - LoVal, and other
+/// words hold the entry's index times 8.
+#[inline(always)]
+fn interleaved_sources<S: Simd>(simd: S, words: &[u8], entries: usize, out: &mut [u32]) -> usize {
+    let (words_v, words_rest) = words.as_chunks::<32>();
+    let (out_v, out_rest) = out.as_chunks_mut::<16>();
+    let entries_v = u16x16::splat(simd, entries as u16);
+    for (i, (words, out)) in words_v.iter().zip(out_v).enumerate() {
+        let word: u16x16<S> = u8x32::from_slice(simd, words).bitcast();
+        let is_fill = (word >> 8).simd_eq(u16x16::splat(simd, 0xff));
+        let index = word >> 3;
+        let is_bad = !is_fill & index.simd_ge(entries_v);
+        store_sources(simd, is_fill, (word & 0xff) ^ 0xff, index, entries_v, out);
+        if is_bad.any_true() {
+            return i * 16 + is_bad.to_bitmask().trailing_zeros() as usize;
+        }
+    }
+    let done = words_v.len() * 16;
+    done + interleaved_sources_scalar(words_rest, entries, out_rest)
+}
+
+fn interleaved_sources_scalar(words: &[u8], entries: usize, out: &mut [u32]) -> usize {
+    let words = words.as_chunks::<2>().0;
+    for (i, (&[lo, hi], out)) in words.iter().zip(out).enumerate() {
+        let index = (usize::from(hi) << 8 | usize::from(lo)) / 8;
+        *out = match hi == 0xff {
+            true => entries + usize::from(255 - lo),
+            false if index < entries => index,
+            false => return i,
+        } as u32;
+    }
+    words.len()
+}
+
+/// Store 16 blocks' sources: `color` for the fills (`is_fill`), offset by
+/// the codebook's `entries`, and `index` for the rest. Fills can land past
+/// what 16 bits hold, so the sources widen to 32.
+#[inline(always)]
+fn store_sources<S: Simd>(
+    simd: S,
+    is_fill: mask16x16<S>,
+    color: u16x16<S>,
+    index: u16x16<S>,
+    entries: u16x16<S>,
+    out: &mut [u32; 16],
+) {
+    let (base_lo, base_hi) = simd.widen_u16x16(is_fill.select(color, index));
+    let (offset_lo, offset_hi) = simd.widen_u16x16(is_fill.select(entries, u16x16::splat(simd, 0)));
+    let (out_lo, out_hi) = out.split_at_mut(8);
+    (base_lo + offset_lo).store_slice(out_lo);
+    (base_hi + offset_hi).store_slice(out_hi);
+}
+
+/// Copy each block of a row of `BW` x `BH` blocks from its source entry
+/// in `codebook` into `strip`, the row's `BH` lines of pixels.
+#[inline(always)]
+fn draw_row<const BW: usize, const BH: usize>(
+    strip: &mut [u8],
+    width: usize,
+    codebook: &[u8],
+    sources: &[u32],
+) {
+    let entries = codebook.as_chunks::<BW>().0.as_chunks::<BH>().0;
+    let mut lines = block_lines::<BW, BH>(strip, width, sources.len());
+    copy_blocks(&mut lines, entries, sources);
+}
+
+/// [`draw_row`] for blocks 4 pixels wide, four blocks at a time: their
+/// entries, one line per lane, transposed so that each line of the four
+/// is one 16-byte store.
+#[inline(always)]
+fn draw_row_simd<S: Simd, const BH: usize>(
+    simd: S,
+    strip: &mut [u8],
+    width: usize,
+    codebook: &[u8],
+    sources: &[u32],
+) {
+    let entries = codebook.as_chunks::<4>().0.as_chunks::<BH>().0;
+    let Some(last) = entries.len().checked_sub(1) else {
+        return;
+    };
+    let mut lines = block_lines::<4, BH>(strip, width, sources.len());
+    let (groups, rest) = sources.as_chunks::<4>();
+    let done = groups.len() * 4;
+    let mut heads = lines
+        .each_mut()
+        .map(|line| line[..done].as_chunks_mut::<4>().0);
+    for (g, &[a, b, c, d]) in groups.iter().enumerate() {
+        let a = entry_u32x4(simd, &entries[(a as usize).min(last)]);
+        let b = entry_u32x4(simd, &entries[(b as usize).min(last)]);
+        let c = entry_u32x4(simd, &entries[(c as usize).min(last)]);
+        let d = entry_u32x4(simd, &entries[(d as usize).min(last)]);
+        let (ab_lo, ab_hi) = (simd.zip_low_u32x4(a, b), simd.zip_high_u32x4(a, b));
+        let (cd_lo, cd_hi) = (simd.zip_low_u32x4(c, d), simd.zip_high_u32x4(c, d));
+        let (ab_lo, ab_hi): (u64x2<S>, u64x2<S>) = (ab_lo.bitcast(), ab_hi.bitcast());
+        let (cd_lo, cd_hi): (u64x2<S>, u64x2<S>) = (cd_lo.bitcast(), cd_hi.bitcast());
+        let transposed = [
+            simd.zip_low_u64x2(ab_lo, cd_lo),
+            simd.zip_high_u64x2(ab_lo, cd_lo),
+            simd.zip_low_u64x2(ab_hi, cd_hi),
+            simd.zip_high_u64x2(ab_hi, cd_hi),
+        ];
+        for (line, pixels) in heads.iter_mut().zip(transposed) {
+            pixels
+                .bitcast::<u8x16<S>>()
+                .store_slice(line[g].as_flattened_mut());
+        }
+    }
+    let mut tails = lines.each_mut().map(|line| &mut line[done..]);
+    copy_blocks(&mut tails, entries, rest);
+}
+
+/// A block row's `BH` lines of pixels, each cut into `n` block-wide
+/// pieces.
+#[inline(always)]
+fn block_lines<const BW: usize, const BH: usize>(
+    strip: &mut [u8],
+    width: usize,
+    n: usize,
+) -> [&mut [[u8; BW]]; BH] {
+    let mut lines = strip.chunks_exact_mut(width);
+    let lines: [_; BH] = std::array::from_fn(|_| lines.next().unwrap_or_default());
+    lines.map(|line| &mut line.as_chunks_mut::<BW>().0[..n])
+}
+
+/// Copy the entry each of `sources` names into the blocks of `lines`.
+#[inline(always)]
+fn copy_blocks<const BW: usize, const BH: usize>(
+    lines: &mut [&mut [[u8; BW]]; BH],
+    entries: &[[[u8; BW]; BH]],
+    sources: &[u32],
+) {
+    // the clamp never bites: a source is past the codebook's own entries
+    // only if it's a fill's, and there are 256 of those after them
+    let Some(last) = entries.len().checked_sub(1) else {
+        return;
+    };
+    // every line exactly as long as the row, for the loop to see
+    let n = sources.len();
+    let mut lines = lines.each_mut().map(|line| &mut line[..n]);
+    for (i, &source) in sources.iter().enumerate() {
+        let entry = &entries[(source as usize).min(last)];
+        for (line, pixels) in lines.iter_mut().zip(entry) {
+            line[i] = *pixels;
+        }
+    }
+}
+
+/// A codebook entry of 4-pixel lines, one line per lane from lane 0.
+#[inline(always)]
+fn entry_u32x4<S: Simd, const BH: usize>(simd: S, entry: &[[u8; 4]; BH]) -> u32x4<S> {
+    let mut bytes = [0; 16];
+    bytes[..BH * 4].copy_from_slice(entry.as_flattened());
+    u8x16::simd_from(simd, bytes).bitcast()
+}
+
+/// [`draw_row`] for blocks of any size, `bw` pixels wide.
+fn draw_row_any(strip: &mut [u8], width: usize, bw: usize, codebook: &[u8], sources: &[u32]) {
+    let bh = strip.len() / width;
+    let entry = bw * bh;
+    let last = codebook.len() / entry - 1;
+    for (y, line) in strip.chunks_exact_mut(width).enumerate() {
+        for (pixels, &source) in line.chunks_exact_mut(bw).zip(sources) {
+            let at = (source as usize).min(last) * entry + y * bw;
+            pixels.copy_from_slice(&codebook[at..at + bw]);
         }
     }
 }
@@ -1183,6 +1427,97 @@ mod tests {
             panic!("expected an indexed frame");
         };
         assert_eq!(pixels, &vec![4, 5, 9, 9, 6, 7, 9, 9]);
+    }
+
+    #[test]
+    fn vector_block_sources_match_the_scalar_ones() {
+        // rows of every length up to 70 blocks, whole vectors and leftovers
+        // alike, with fills, copies and the odd index past the codebook, at
+        // the detected SIMD level and the baseline one
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut random = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for level in [Level::new(), Level::baseline()] {
+            for len in 0..=70 {
+                for entries in [0, 1, 300, 0xff00, 0xffff] {
+                    let lo: Vec<u8> = (0..len).map(|_| random() as u8).collect();
+                    // mostly low HiVals, so that fills, copies and indexes
+                    // past a small codebook all turn up
+                    let hi: Vec<u8> = (0..len)
+                        .map(|_| match random() % 8 {
+                            0 => 0x0f,
+                            1 => 0xff,
+                            2 => random() as u8,
+                            _ => (random() % 2) as u8,
+                        })
+                        .collect();
+                    let words: Vec<u8> = lo.iter().zip(&hi).flat_map(|(&l, &h)| [l, h]).collect();
+
+                    let (mut vector, mut scalar) = (vec![0; len], vec![0; len]);
+                    let n = dispatch!(level, simd => split_sources(simd, &lo, &hi, 0x0f, entries, &mut vector));
+                    let m = split_sources_scalar(&lo, &hi, 0x0f, entries, &mut scalar);
+                    assert_eq!(
+                        (n, &vector[..n]),
+                        (m, &scalar[..m]),
+                        "v2 at {level:?}, {len} blocks, {entries} entries"
+                    );
+
+                    let n = dispatch!(level, simd => interleaved_sources(simd, &words, entries, &mut vector));
+                    let m = interleaved_sources_scalar(&words, entries, &mut scalar);
+                    assert_eq!(
+                        (n, &vector[..n]),
+                        (m, &scalar[..m]),
+                        "v1 at {level:?}, {len} blocks, {entries} entries"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_past_the_codebook_fails_with_the_blocks_before_it_drawn() {
+        // one row of 40 blocks: two vectors' worth and 8 left over, with the
+        // bad block in the second vector, then among the leftovers
+        let mut header = v2_header();
+        (header.width, header.height) = (160, 2);
+        let codebook = [[1; 8], [2; 8]].concat();
+        for bad in [20, 37] {
+            let mut decoder = FrameDecoder::new(&header).unwrap();
+            let mut table = vec![0; 80];
+            for block in 0..40 {
+                (table[block], table[40 + block]) = match block {
+                    _ if block == bad => (5, 0),      // entry 5 of 2
+                    _ if block % 3 == 0 => (7, 0x0f), // a fill with color 7
+                    _ => (block as u8 % 2, 0),
+                };
+            }
+            let mut vqfr = chunk("CBF0", &codebook);
+            vqfr.extend(chunk("VPT0", &table));
+            assert_eq!(
+                decoder.decode_frame(&vqfr).map_err(|e| e.kind()),
+                Err(ErrorKind::Video(VideoError::BlockIndexOutOfRange))
+            );
+
+            let frame = decoder.decode_frame_ref(&[]).unwrap();
+            let FramePixelsRef::Indexed { pixels, .. } = frame.pixels else {
+                panic!("expected an indexed frame");
+            };
+            for block in 0..40 {
+                let color = match block {
+                    _ if block >= bad => 0, // never drawn
+                    _ if block % 3 == 0 => 7,
+                    _ => block as u8 % 2 + 1,
+                };
+                for line in 0..2 {
+                    let at = line * 160 + block * 4;
+                    assert_eq!(pixels[at..at + 4], [color; 4], "block {block} of bad {bad}");
+                }
+            }
+        }
     }
 
     #[test]
