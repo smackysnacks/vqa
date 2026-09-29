@@ -735,10 +735,11 @@ impl FrameDecoder {
         if !self.hicolor {
             return Err(ErrorKind::Video(VideoError::WrongPointerFormat));
         }
-        // every known HiColor movie uses 4x2 or 4x4 blocks
-        match (self.block_w, self.block_h) {
-            (4, 2) => self.render_vptr_with::<4, 2>(stream),
-            (4, 4) => self.render_vptr_with::<4, 4>(stream),
+        // every known HiColor movie uses 4x2 or 4x4 blocks, in frames a
+        // whole number of blocks wide
+        match (self.block_w, self.block_h, self.width % 4) {
+            (4, 2, 0) => self.render_vptr_with::<4, 2>(stream),
+            (4, 4, 0) => self.render_vptr_with::<4, 4>(stream),
             _ => self.render_vptr_with::<0, 0>(stream),
         }
     }
@@ -748,98 +749,60 @@ impl FrameDecoder {
         &mut self,
         stream: &[u8],
     ) -> Result<(), ErrorKind> {
-        let mut pos = 0usize; // current block, row-major
+        let (bw, bh) = self.block_size::<BW, BH>();
+        let mut blocks = BlockWriter::<BW, BH> {
+            frame: &mut self.frame16,
+            codebook: &self.codebook16,
+            width: self.width,
+            bw,
+            bh,
+            blocks_x: self.blocks_x,
+            blocks: self.blocks_x * self.blocks_y,
+            pos: 0,
+            bx: 0,
+            line: 0,
+        };
+        let truncated = ErrorKind::Video(VideoError::TruncatedPointerStream);
         let mut sp = 0;
         while sp < stream.len() {
-            let val = match stream.get(sp..sp + 2) {
-                Some(b) => u16::from_le_bytes([b[0], b[1]]),
-                None => return Err(ErrorKind::Video(VideoError::TruncatedPointerStream)),
+            let Some(&[lo, hi]) = stream[sp..].first_chunk() else {
+                return Err(truncated);
             };
+            let val = u16::from_le_bytes([lo, hi]);
             sp += 2;
 
+            // most commands write a single block: take them apart from the
+            // rest, with a branch the CPU predicts better than a jump table
+            if val >> 13 == 0b011 {
+                blocks.write_one(usize::from(val & 0x1fff))?;
+                continue;
+            }
             let run_count = usize::from(val >> 8 & 0x1f) + 1;
             match val >> 13 {
-                // skip blocks (leave them unchanged); saturating, since a
-                // long run of skips could otherwise overflow a 32-bit usize
-                0b000 => pos = pos.saturating_add(usize::from(val & 0x1fff)),
+                // skip blocks (leave them unchanged)
+                0b000 => blocks.skip(usize::from(val & 0x1fff)),
                 // write one of the first 256 blocks 2*(run+1) times
-                0b001 => {
-                    for _ in 0..run_count * 2 {
-                        self.write_block16::<BW, BH>(&mut pos, usize::from(val & 0xff), false)?;
-                    }
-                }
+                0b001 => blocks.write_run(usize::from(val & 0xff), run_count * 2, false)?,
                 // write a block, then 2*(run+1) more indexed by stream bytes
                 0b010 => {
-                    self.write_block16::<BW, BH>(&mut pos, usize::from(val & 0xff), false)?;
-                    for _ in 0..run_count * 2 {
-                        let index = *stream
-                            .get(sp)
-                            .ok_or(ErrorKind::Video(VideoError::TruncatedPointerStream))?;
-                        sp += 1;
-                        self.write_block16::<BW, BH>(&mut pos, usize::from(index), false)?;
-                    }
+                    blocks.write_run(usize::from(val & 0xff), 1, false)?;
+                    let indexes = &stream[sp..(sp + run_count * 2).min(stream.len())];
+                    sp += indexes.len();
+                    blocks.write_each(indexes, run_count * 2)?;
                 }
-                // write a single block, optionally skipping alpha pixels
-                0b011 => {
-                    self.write_block16::<BW, BH>(&mut pos, usize::from(val & 0x1fff), false)?
-                }
-                0b100 => self.write_block16::<BW, BH>(&mut pos, usize::from(val & 0x1fff), true)?,
+                // write a single block, skipping alpha pixels
+                0b100 => blocks.write_run(usize::from(val & 0x1fff), 1, true)?,
                 // write a block N times, N from the next stream byte,
                 // optionally skipping alpha pixels
                 0b101 | 0b110 => {
-                    let count = *stream
-                        .get(sp)
-                        .ok_or(ErrorKind::Video(VideoError::TruncatedPointerStream))?;
+                    let count = *stream.get(sp).ok_or(truncated)?;
                     sp += 1;
                     let alpha = val >> 13 == 0b110;
-                    for _ in 0..count {
-                        self.write_block16::<BW, BH>(&mut pos, usize::from(val & 0x1fff), alpha)?;
-                    }
+                    blocks.write_run(usize::from(val & 0x1fff), usize::from(count), alpha)?;
                 }
                 _ => return Err(ErrorKind::Video(VideoError::UnknownPointerCommand)),
             }
         }
-        Ok(())
-    }
-
-    /// Write codebook entry `index` at block position `pos` (advancing it).
-    /// With `alpha_skip`, pixels whose alpha bit is set keep their previous
-    /// value (Blade Runner overlay movies).
-    #[inline(always)]
-    fn write_block16<const BW: usize, const BH: usize>(
-        &mut self,
-        pos: &mut usize,
-        index: usize,
-        alpha_skip: bool,
-    ) -> Result<(), ErrorKind> {
-        let (bw, bh) = self.block_size::<BW, BH>();
-        if *pos >= self.blocks_x * self.blocks_y {
-            return Err(ErrorKind::Video(VideoError::PointerStreamOverrun));
-        }
-        let entry = bw * bh;
-        let Some(src) = self.codebook16.get(index * entry..(index + 1) * entry) else {
-            // retail movies contain the occasional stray command word whose
-            // index points past the codebook (the original players read out
-            // of bounds and drew garbage); keep the block's previous pixels
-            *pos += 1;
-            return Ok(());
-        };
-        let (bx, by) = (*pos % self.blocks_x, *pos / self.blocks_x);
-        let dst = by * bh * self.width + bx * bw;
-        for (row, src) in src.chunks_exact(bw).enumerate() {
-            let at = dst + row * self.width;
-            let dst = &mut self.frame16[at..at + bw];
-            if alpha_skip {
-                for (pixel, &new) in dst.iter_mut().zip(src) {
-                    if new & 0x8000 == 0 {
-                        *pixel = new;
-                    }
-                }
-            } else {
-                dst.copy_from_slice(src);
-            }
-        }
-        *pos += 1;
         Ok(())
     }
 
@@ -859,6 +822,171 @@ impl FrameDecoder {
                 }
             },
         }
+    }
+}
+
+/// Writes HiColor codebook entries block after block, row-major, as a
+/// pointer stream's commands say. It follows the block's place in the frame
+/// as it moves on, and checks each command against the frame once, so
+/// writing a block is a handful of line copies. Blocks are `BW` x `BH`
+/// when those are nonzero, which also takes a frame a whole number of
+/// blocks wide; else `bw` x `bh`.
+struct BlockWriter<'a, const BW: usize, const BH: usize> {
+    frame: &'a mut [u16],
+    codebook: &'a [u16],
+    width: usize,
+    bw: usize,
+    bh: usize,
+    blocks_x: usize,
+    blocks: usize,
+    /// the next block to write, which may be past the frame after a skip,
+    /// and where it is: its column and the first pixel of its row of blocks
+    pos: usize,
+    bx: usize,
+    line: usize,
+}
+
+impl<const BW: usize, const BH: usize> BlockWriter<'_, BW, BH> {
+    /// The block size.
+    #[inline(always)]
+    fn size(&self) -> (usize, usize) {
+        match BW {
+            0 => (self.bw, self.bh),
+            _ => (BW, BH),
+        }
+    }
+
+    /// Move `count` blocks on without writing them.
+    #[inline(always)]
+    fn skip(&mut self, count: usize) {
+        // saturating, since a long run of skips could otherwise overflow a
+        // 32-bit usize
+        self.pos = self.pos.saturating_add(count);
+        if self.pos < self.blocks {
+            self.bx = self.pos % self.blocks_x;
+            self.line = self.pos / self.blocks_x * self.size().1 * self.width;
+        }
+    }
+
+    /// Move on to the next block.
+    #[inline(always)]
+    fn advance(&mut self) {
+        self.pos += 1;
+        self.bx += 1;
+        if self.bx == self.blocks_x {
+            self.bx = 0;
+            self.line += self.size().1 * self.width;
+        }
+    }
+
+    /// Write entry `index` into the next block: [`BlockWriter::write_run`]
+    /// for one block, without the loop.
+    #[inline(always)]
+    fn write_one(&mut self, index: usize) -> Result<(), ErrorKind> {
+        if self.pos >= self.blocks {
+            return Err(ErrorKind::Video(VideoError::PointerStreamOverrun));
+        }
+        let entry_len = self.size().0 * self.size().1;
+        if let Some(entry) = self
+            .codebook
+            .get(index * entry_len..(index + 1) * entry_len)
+        {
+            self.put(entry, false);
+        }
+        self.advance();
+        Ok(())
+    }
+
+    /// Write entry `index` into the next `count` blocks. With `alpha_skip`,
+    /// pixels whose alpha bit is set keep their previous value (Blade
+    /// Runner's overlay movies).
+    #[inline(always)]
+    fn write_run(&mut self, index: usize, count: usize, alpha_skip: bool) -> Result<(), ErrorKind> {
+        let room = self.blocks.saturating_sub(self.pos);
+        let entry_len = self.size().0 * self.size().1;
+        let entry = self
+            .codebook
+            .get(index * entry_len..(index + 1) * entry_len);
+        for _ in 0..count.min(room) {
+            // retail movies contain the occasional stray command word whose
+            // index points past the codebook (the original players read out
+            // of bounds and drew garbage); those blocks keep their pixels
+            if let Some(entry) = entry {
+                self.put(entry, alpha_skip);
+            }
+            self.advance();
+        }
+        match count <= room {
+            true => Ok(()),
+            false => Err(ErrorKind::Video(VideoError::PointerStreamOverrun)),
+        }
+    }
+
+    /// Write the entry each of `indexes` names into the blocks that follow.
+    /// A stream cut short leaves fewer indexes than the `wanted` ones:
+    /// that fails once they are written, unless they overrun the frame
+    /// first.
+    #[inline(always)]
+    fn write_each(&mut self, indexes: &[u8], wanted: usize) -> Result<(), ErrorKind> {
+        let room = self.blocks.saturating_sub(self.pos);
+        let entry_len = self.size().0 * self.size().1;
+        let written = indexes.len().min(room);
+        for &index in &indexes[..written] {
+            let index = usize::from(index);
+            if let Some(entry) = self
+                .codebook
+                .get(index * entry_len..(index + 1) * entry_len)
+            {
+                self.put(entry, false);
+            }
+            self.advance();
+        }
+        match written {
+            _ if written == wanted => Ok(()),
+            // the index for the next block is missing
+            _ if written == indexes.len() => {
+                Err(ErrorKind::Video(VideoError::TruncatedPointerStream))
+            }
+            _ => Err(ErrorKind::Video(VideoError::PointerStreamOverrun)),
+        }
+    }
+
+    /// Write `entry` into the next block, which is in the frame.
+    #[inline(always)]
+    fn put(&mut self, entry: &[u16], alpha_skip: bool) {
+        // with a block size to go by, the frame as block-wide pieces of
+        // lines, `stride` pieces to a line
+        if let Some(stride) = self.width.checked_div(BW) {
+            let pieces = self.frame.as_chunks_mut::<BW>().0;
+            let first = self.line / BW + self.bx;
+            for (y, src) in entry.as_chunks::<BW>().0.iter().enumerate() {
+                put_line(&mut pieces[first + y * stride], src, alpha_skip);
+            }
+        } else {
+            let at = self.line + self.bx * self.bw;
+            for (y, src) in entry.chunks_exact(self.bw).enumerate() {
+                put_line(
+                    &mut self.frame[at + y * self.width..][..self.bw],
+                    src,
+                    alpha_skip,
+                );
+            }
+        }
+    }
+}
+
+/// Copy a line of a block's pixels. With `alpha_skip`, pixels whose alpha
+/// bit is set keep their previous value (Blade Runner's overlay movies).
+#[inline(always)]
+fn put_line(dst: &mut [u16], src: &[u16], alpha_skip: bool) {
+    if alpha_skip {
+        for (pixel, &new) in dst.iter_mut().zip(src) {
+            if new & 0x8000 == 0 {
+                *pixel = new;
+            }
+        }
+    } else {
+        dst.copy_from_slice(src);
     }
 }
 
@@ -1350,6 +1478,58 @@ mod tests {
             decoder.decode_frame(&vqfr).map_err(|e| e.kind()),
             Err(ErrorKind::Video(VideoError::BlockIndexOutOfRange))
         );
+    }
+
+    #[test]
+    fn hicolor_runs_cross_block_rows_and_fail_where_the_frame_or_stream_ends() {
+        // two rows of four 4x2 blocks, in a frame a whole number of blocks
+        // wide and in one that isn't, which takes the path for any size
+        let codebook: Vec<u8> = [1u16, 2, 3]
+            .iter()
+            .flat_map(|&value| [value; 8])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        for width in [16, 18] {
+            let mut header = hicolor_header();
+            header.width = width;
+            let width = usize::from(width);
+            // the error, and the top-left pixel of each block
+            let decode = |stream: &[u8]| {
+                let mut decoder = FrameDecoder::new(&header).unwrap();
+                decoder.process_vqfl(&chunk("CBF0", &codebook)).unwrap();
+                let vptr = chunk("VPTR", stream);
+                let error = decoder.decode_frame_ref(&vptr).err().map(|e| e.kind());
+                let frame = decoder.decode_frame_ref(&[]).unwrap();
+                let FramePixelsRef::HiColor { pixels } = frame.pixels else {
+                    panic!("expected a hicolor frame");
+                };
+                let blocks: Vec<u16> = (0..8)
+                    .map(|block| pixels[block / 4 * 2 * width + block % 4 * 4])
+                    .collect();
+                (error, blocks)
+            };
+
+            // skip 2 blocks, write entry 0 twice (001), then entry 1 three
+            // times (101), past the end of the first row
+            let mut stream = Vec::new();
+            stream.extend(0b000_0000000000010u16.to_le_bytes());
+            stream.extend(0b001_00000_00000000u16.to_le_bytes());
+            stream.extend(0b101_0000000000001u16.to_le_bytes());
+            stream.push(3);
+            let drawn = vec![0, 0, 1, 1, 2, 2, 2, 0];
+            assert_eq!(decode(&stream), (None, drawn), "{width} wide");
+
+            // then entry 2 into the last block, and two more from stream
+            // bytes (010): with the bytes there, the frame runs out first...
+            let drawn = vec![0, 0, 1, 1, 2, 2, 2, 3];
+            stream.extend(0b010_00000_00000010u16.to_le_bytes());
+            let overrun = [stream.as_slice(), &[0, 0]].concat();
+            let error = Some(ErrorKind::Video(VideoError::PointerStreamOverrun));
+            assert_eq!(decode(&overrun), (error, drawn.clone()), "{width} wide");
+            // ...and without them, the stream does
+            let error = Some(ErrorKind::Video(VideoError::TruncatedPointerStream));
+            assert_eq!(decode(&stream), (error, drawn), "{width} wide");
+        }
     }
 
     #[test]
