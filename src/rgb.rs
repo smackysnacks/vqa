@@ -87,13 +87,25 @@ fn to_bytes<S: Simd>(v: u16x16<S>) -> u8x16<S> {
 /// Convert palette indices to RGB888; indices with no palette entry come
 /// out black. `out` holds three bytes per pixel.
 pub(crate) fn indexed_to_rgb888(pixels: &[u8], palette: &[[u8; 3]], out: &mut [u8]) {
-    // a full table makes every index valid, with missing entries black
-    let mut table = [[0; 3]; 256];
-    for (entry, &rgb) in table.iter_mut().zip(palette) {
-        *entry = rgb;
+    // a full table makes every index valid, with missing entries black;
+    // each color is the little-endian word of its bytes, the top one 0
+    let mut table = [0u32; 256];
+    for (entry, &[r, g, b]) in table.iter_mut().zip(palette) {
+        *entry = u32::from_le_bytes([r, g, b, 0]);
     }
-    for (rgb, &index) in out.as_chunks_mut::<3>().0.iter_mut().zip(pixels) {
-        *rgb = table[usize::from(index)];
+    // four pixels' 12 bytes as three words, rather than 3-byte stores
+    let (quads, rest) = pixels.as_chunks::<4>();
+    let (out_quads, out_rest) = out.as_chunks_mut::<12>();
+    for (&[a, b, c, d], out) in quads.iter().zip(out_quads) {
+        let [a, b, c, d] = [a, b, c, d].map(|index| table[usize::from(index)]);
+        let words = [a | b << 24, b >> 8 | c << 16, c >> 16 | d << 8];
+        for (out, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+            *out = word.to_le_bytes();
+        }
+    }
+    for (rgb, &index) in out_rest.as_chunks_mut::<3>().0.iter_mut().zip(rest) {
+        let [r, g, b, _] = table[usize::from(index)].to_le_bytes();
+        *rgb = [r, g, b];
     }
 }
 
@@ -325,5 +337,25 @@ mod tests {
         let mut out = [0xaa; 9];
         indexed_to_rgb888(&[1, 0, 200], &palette, &mut out);
         assert_eq!(out, [4, 5, 6, 1, 2, 3, 0, 0, 0]);
+    }
+
+    #[test]
+    fn indexed_rgb888_matches_a_lookup_per_pixel() {
+        // every index, in lengths on and off the four pixels taken at a
+        // time, with a palette too short for some of them
+        let palette: Vec<[u8; 3]> = (0..200u8)
+            .map(|i| [i, i ^ 0x5a, i.wrapping_mul(7)])
+            .collect();
+        let pixels: Vec<u8> = (0..=255).rev().chain(0..=255).collect();
+        for len in (0..20).chain(500..=pixels.len()) {
+            let pixels = &pixels[..len];
+            let expected: Vec<u8> = pixels
+                .iter()
+                .flat_map(|&p| palette.get(usize::from(p)).copied().unwrap_or_default())
+                .collect();
+            let mut out = vec![0xaa; len * 3];
+            indexed_to_rgb888(pixels, &palette, &mut out);
+            assert_eq!(out, expected, "{len} pixels");
+        }
     }
 }
