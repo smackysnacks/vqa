@@ -95,6 +95,19 @@ output is unchanged.
   64-fold, so a small crafted movie could otherwise make it allocate
   gigabytes. `audio_chunks` holds one chunk at a time and has no limit.
 - Every fallible function documents its errors in an `# Errors` section.
+- Faster decoding, with output unchanged:
+  - 8-bit frames draw 2.5–4.5 times as fast. Where each block draws from
+    is worked out with SIMD, 16 blocks at a time, and blocks are copied four
+    at a time, one store per line of pixels. A 640x400 frame decodes in
+    42 µs instead of 82.
+  - HiColor frames draw 20–30% faster.
+  - 8-bit frames convert to RGB888 twice as fast, and HiColor frames a
+    third faster, from a SIMD kernel that takes 32 pixels at a time.
+- The README and the crate docs say to build for WebAssembly with
+  `simd128`, without which the SIMD paths fall back to scalar code.
+- The `bench` example times drawing and LCW decompression apart, and takes
+  damaged or cut-off movies as far as they decode. `just bench` runs it
+  natively, built for generic x86-64, or on wasm32 under Node.
 
 ### Removed
 

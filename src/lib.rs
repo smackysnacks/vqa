@@ -91,6 +91,15 @@
 //! The `doc/` directory of the repository carries the format references this
 //! crate is written against: `vqa.txt` for v1/v2 and `hc-vqa.txt` for the
 //! HiColor scheme.
+//!
+//! # Performance
+//!
+//! Drawing 8-bit frames and converting HiColor frames to RGB use SIMD,
+//! chosen at run time on x86 (AVX-512, AVX2, SSE4.2 or SSE2), and NEON on
+//! 64-bit ARM. WebAssembly has no run-time detection: build with
+//! `-C target-feature=+simd128`, or those paths fall back to scalar code,
+//! which on wasm32 draws 8-bit frames 2.6 times as slowly and converts
+//! HiColor frames three times as slowly.
 
 #![warn(rust_2018_idioms)]
 #![warn(missing_docs)]

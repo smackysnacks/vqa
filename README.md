@@ -59,6 +59,24 @@ one. `FrameDecoder`, `lcw` (LCW/"Format80" decompression), and `audio` (IMA
 and Westwood ADPCM) are the decoding layers underneath. See the
 [API docs](https://docs.rs/vqa) for the full tour.
 
+## Performance
+
+A 640x400 frame decodes in 25–50 µs on a current desktop CPU, over a
+thousand times faster than the movies play. Drawing 8-bit frames and
+converting HiColor frames to RGB use SIMD through
+[fearless_simd](https://crates.io/crates/fearless_simd): AVX-512, AVX2,
+SSE4.2 or SSE2 on x86, chosen at run time, so a build for generic x86-64
+runs as fast as one for the host CPU, and NEON on 64-bit ARM.
+
+WebAssembly has no run-time detection, so enable `simd128` when building
+for it; every major browser, Node and wasmtime support it. Without it, the
+crate falls back to scalar code, which on wasm32 draws 8-bit frames 2.6
+times as slowly and converts HiColor frames to RGB three times as slowly:
+
+```sh
+RUSTFLAGS="-C target-feature=+simd128" cargo build --release --target wasm32-unknown-unknown
+```
+
 ## Examples
 
 Runnable examples exercise the high-level API, using the bundled
