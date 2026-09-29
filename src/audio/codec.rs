@@ -66,6 +66,25 @@ static NEXT_INDEX: [[u8; 16]; 89] = {
     table
 };
 
+/// `NEXT_INDEX_BYTE[index][byte]`: the step index after decoding both
+/// nibbles of `byte`, low one first, at step index `index`. One lookup a
+/// byte rather than two in a row halves the chain of dependent loads that
+/// decoding waits on.
+static NEXT_INDEX_BYTE: [[u8; 256]; 89] = {
+    let mut table = [[0; 256]; 89];
+    let mut index = 0;
+    while index < 89 {
+        let mut byte = 0;
+        while byte < 256 {
+            let middle = NEXT_INDEX[index][byte & 0xf] as usize;
+            table[index][byte] = NEXT_INDEX[middle][byte >> 4];
+            byte += 1;
+        }
+        index += 1;
+    }
+    table
+};
+
 /// Predictor state for one audio channel, carried across chunk boundaries.
 ///
 /// Feed every chunk of a channel through [`decompress`] with the same state;
@@ -86,19 +105,17 @@ impl CodecState {
         }
     }
 
-    /// Decode one 4-bit sample, advancing the predictor.
-    #[inline(always)]
-    pub(crate) fn decode(&mut self, nibble: u8) -> i16 {
-        let nibble = usize::from(nibble & 0xf);
-        self.sample = (self.sample + DIFF[self.index][nibble]).clamp(-32768, 32767);
-        self.index = usize::from(NEXT_INDEX[self.index][nibble]);
-        self.sample as i16
-    }
-
     /// Decode one byte: two samples, low nibble first.
     #[inline(always)]
     pub(crate) fn decode_byte(&mut self, byte: u8) -> [i16; 2] {
-        [self.decode(byte), self.decode(byte >> 4)]
+        let (low, high) = (usize::from(byte & 0xf), usize::from(byte >> 4));
+        // the step index between the two samples, off the chain from one
+        // byte's index to the next
+        let middle = usize::from(NEXT_INDEX[self.index][low]);
+        let first = (self.sample + DIFF[self.index][low]).clamp(-32768, 32767);
+        self.sample = (first + DIFF[middle][high]).clamp(-32768, 32767);
+        self.index = usize::from(NEXT_INDEX_BYTE[self.index][usize::from(byte)]);
+        [first as i16, self.sample as i16]
     }
 }
 

@@ -103,6 +103,7 @@ output is unchanged.
   - HiColor frames draw 20–30% faster.
   - 8-bit frames convert to RGB888 twice as fast, and HiColor frames a
     third faster, from a SIMD kernel that takes 32 pixels at a time.
+  - Mono IMA ADPCM soundtracks decode 40% faster, and stereo ones 10%.
 - The README and the crate docs say to build for WebAssembly with
   `simd128`, without which the SIMD paths fall back to scalar code.
 - The `bench` example times drawing and LCW decompression apart, and takes
