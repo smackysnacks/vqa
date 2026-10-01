@@ -170,7 +170,8 @@ impl<'a> VQA<'a> {
     /// Decode the whole soundtrack into interleaved signed 16-bit samples
     /// ([`VQAHeader::num_channels`] channels at [`VQAHeader::sample_rate`]
     /// Hz): IMA ADPCM (`SND2`) in its per-version stereo layouts, Westwood
-    /// ADPCM (`SND1`), and raw PCM (`SND0`).
+    /// ADPCM (`SND1`), which is mono and so goes to both channels of a
+    /// stereo movie, and raw PCM (`SND0`).
     ///
     /// # Errors
     ///
@@ -284,7 +285,14 @@ impl AudioChunks<'_> {
                 b"SND1" => {
                     self.bytes.clear();
                     westwood::decompress_into(chunk.data, &mut self.bytes);
-                    samples.extend(self.bytes.iter().map(|&b| widen(b)));
+                    // Westwood ADPCM is mono: a stereo movie plays it on both
+                    // channels
+                    let mono = self.bytes.iter().map(|&b| widen(b));
+                    if self.stereo {
+                        samples.extend(mono.flat_map(|sample| [sample; 2]));
+                    } else {
+                        samples.extend(mono);
+                    }
                 }
                 // raw PCM: signed 16-bit, or unsigned 8-bit
                 b"SND0" if self.pcm16 => samples.extend(

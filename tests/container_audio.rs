@@ -1300,6 +1300,18 @@ fn snd1_westwood_adpcm_decodes_each_chunk_from_silence() {
     assert_eq!(decode_audio(&file), Ok(expected));
 }
 
+#[test]
+fn snd1_sound_plays_on_both_channels_of_a_stereo_movie() {
+    // vqa.txt, Appendix C: Westwood ADPCM is "ONLY for mono 8-bit unsigned
+    // sound", so a movie whose header says stereo gets each sample on both
+    // channels, as the interleaved samples decode_audio promises
+    let file = movie(
+        &sound_header(VQAVersion::One, 2, 8),
+        &[chunk(b"SND1", &[2, 0, 2, 0, 0x00, 0xff])],
+    );
+    assert_eq!(decode_audio(&file), Ok(vec![-32768, -32768, 32512, 32512]));
+}
+
 // ---------------------------------------------------------------------------
 // VQA::audio_chunks
 
