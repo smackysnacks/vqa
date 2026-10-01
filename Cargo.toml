@@ -20,8 +20,9 @@ include = ["/src", "/examples/*.rs", "/CHANGELOG.md", "/LICENSE", "/README.md"]
 [dependencies]
 fearless_simd = "1.0"
 
-# for the player example; left out on wasm so the tests run there (CI runs
-# them on wasm32-wasip1 to cover a 32-bit target)
+# for the player example; left out on wasm, where they don't build, so the
+# tests run there (CI runs them on wasm32-wasip1 to cover a 32-bit target)
+# and the player builds as a stub
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 cpal = "0.18"
 minifb = "0.28"

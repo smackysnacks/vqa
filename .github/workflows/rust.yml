@@ -80,9 +80,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # the golden tests read the sample movie by its absolute path
+      # the golden tests read the sample movie by its absolute path; the
+      # examples are built too, so one that doesn't build for wasm fails here
       - name: Run tests
-        run: cargo test --target wasm32-wasip1 --lib --tests
+        run: cargo test --target wasm32-wasip1
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir ${{ github.workspace }}
 
