@@ -271,6 +271,11 @@ impl<'a> Checkpoints<'a> {
     }
 }
 
+/// The most soundtrack samples played, the limit of `VQA::decode_audio`:
+/// over 25 minutes of stereo sound at 22050 Hz. Westwood ADPCM expands
+/// 64-fold, so a small crafted movie could otherwise ask for gigabytes.
+const MAX_SAMPLES: usize = 1 << 26;
+
 /// Decode the soundtrack and start a cpal stream playing it. Returns `None`
 /// if the movie has no sound or any part of audio setup fails (with a
 /// warning where one is due); the caller then paces video by wall clock.
@@ -278,12 +283,18 @@ fn start_audio(vqa: &VQA<'_>, paused: Arc<AtomicBool>) -> Option<Audio> {
     if !vqa.header.has_sound() {
         return None;
     }
-    // a damaged movie plays the sound up to the bad chunk
+    // a damaged movie plays the sound up to the bad chunk, and an overlong
+    // one up to the limit
     let mut samples = Vec::new();
     let mut chunks = vqa.audio_chunks();
     while let Some(result) = chunks.next_into(&mut samples) {
         if let Err(e) = result {
             eprintln!("warning: soundtrack stops early: {e}");
+            break;
+        }
+        if samples.len() > MAX_SAMPLES {
+            eprintln!("warning: soundtrack stops early: over {MAX_SAMPLES} samples");
+            samples.truncate(MAX_SAMPLES);
             break;
         }
     }
