@@ -14,10 +14,14 @@ fn main() {
         return;
     }
     let out_dir = args.get(2).map(String::as_str).unwrap_or(".");
-    let every: usize = args
-        .get(3)
-        .map(|n| n.parse().expect("bad step"))
-        .unwrap_or(1);
+    let every: usize = match args.get(3).map(|n| n.parse()) {
+        None => 1,
+        Some(Ok(n)) if n > 0 => n,
+        Some(_) => {
+            println!("bad every-nth {:?}: expected a positive number", args[3]);
+            return;
+        }
+    };
 
     let buffer = std::fs::read(&args[1]).expect("failed to read file");
     let vqa = VQA::parse(&buffer).expect("failed to parse VQA");
@@ -37,7 +41,14 @@ fn main() {
     let mut rgb = Vec::new();
     let mut i = 0;
     while let Some(frame) = frames.next_ref() {
-        let frame = frame.expect("failed to decode frame");
+        // a damaged movie gives up the frames before the bad one, and fails
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        };
         if i % every == 0 {
             rgb.resize(frame.width * frame.height * 3, 0);
             frame.write_rgb888(&mut rgb);

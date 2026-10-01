@@ -2,15 +2,10 @@
 //! all 130 video frames and the full soundtrack - and verify the output
 //! against known checksums, locking in decoder behavior across refactors.
 
+mod common;
+
+use common::{FNV_BASIS, fnv1a};
 use vqa::{FramePixels, FramePixelsRef, FrameRef, VQA};
-
-const FNV_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-
-fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
-    bytes.iter().fold(hash, |hash, &byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
-    })
-}
 
 fn wwlogo() -> Vec<u8> {
     std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/wwlogo.vqa"))
@@ -61,6 +56,43 @@ fn decodes_wwlogo_audio_to_known_checksum() {
         .iter()
         .fold(FNV_BASIS, |hash, s| fnv1a(hash, &s.to_le_bytes()));
     assert_eq!(hash, 0x8f66_69e6_e5b3_4e72);
+}
+
+#[test]
+fn converts_wwlogo_frames_to_known_rgb888_checksum() {
+    let buffer = wwlogo();
+    let vqa = VQA::parse(&buffer).expect("failed to parse VQA");
+
+    // borrowed frames convert into a reused buffer; owned ones must agree
+    let mut frames = vqa.frames().expect("frame decoder rejected the header");
+    let mut rgb = vec![0; 640 * 400 * 3];
+    let mut rgba = vec![0; 640 * 400 * 4];
+    let mut xrgb = vec![0; 640 * 400];
+    let mut hash = FNV_BASIS;
+    let mut n = 0;
+    while let Some(frame) = frames.next_ref() {
+        let frame = frame.expect("failed to decode frame");
+        frame.write_rgb888(&mut rgb);
+        assert_eq!(frame.to_frame().to_rgb888(), rgb);
+        hash = fnv1a(hash, &rgb);
+
+        // the 4-byte formats hold the same colors (checked on every 13th
+        // frame to keep debug builds quick)
+        if n % 13 == 0 {
+            let rgb = rgb.as_chunks::<3>().0;
+            frame.write_rgba8888(&mut rgba);
+            let expected: Vec<u8> = rgb.iter().flat_map(|&[r, g, b]| [r, g, b, 0xff]).collect();
+            assert!(rgba == expected, "RGBA8888 of frame {n}");
+            frame.write_xrgb8888(&mut xrgb);
+            let expected: Vec<u32> = rgb
+                .iter()
+                .map(|&[r, g, b]| u32::from_be_bytes([0, r, g, b]))
+                .collect();
+            assert!(xrgb == expected, "XRGB8888 of frame {n}");
+        }
+        n += 1;
+    }
+    assert_eq!(hash, 0x55ba_0217_34ad_6270);
 }
 
 /// FNV-1a over one HiColor frame's pixels.

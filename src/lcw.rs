@@ -18,8 +18,10 @@ pub enum Mode {
     Relative,
 }
 
-/// Errors produced by [`decompress`] on malformed streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Errors produced by [`decompress`] on malformed streams. New kinds may be
+/// added in minor releases.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LcwError {
     /// The stream ended in the middle of a command.
     Truncated,
@@ -47,6 +49,13 @@ impl std::error::Error for LcwError {}
 ///
 /// `max_out` caps the output size so malformed data cannot demand unbounded
 /// allocations; pass the expected decompressed size.
+///
+/// # Errors
+///
+/// - [`LcwError::Truncated`] if the stream ends in the middle of a command
+/// - [`LcwError::BadOffset`] if a copy command reads output that hasn't
+///   been written yet
+/// - [`LcwError::TooLarge`] if the output would grow past `max_out` bytes
 pub fn decompress(src: &[u8], max_out: usize) -> Result<Vec<u8>, LcwError> {
     match src.split_first() {
         Some((0, rest)) => decompress_with(rest, Mode::Relative, max_out),
@@ -55,6 +64,10 @@ pub fn decompress(src: &[u8], max_out: usize) -> Result<Vec<u8>, LcwError> {
 }
 
 /// Decompress an LCW stream with an explicit offset [`Mode`].
+///
+/// # Errors
+///
+/// As for [`decompress`].
 pub fn decompress_with(src: &[u8], mode: Mode, max_out: usize) -> Result<Vec<u8>, LcwError> {
     let mut out = Output::new(src.len(), max_out);
     let mut sp = 0;
@@ -233,6 +246,14 @@ mod tests {
     #[test]
     fn tolerates_missing_end_marker() {
         assert_eq!(decompress(b"\x82ab", 64).unwrap(), b"ab");
+    }
+
+    #[test]
+    fn tolerates_missing_end_marker_in_the_relative_variant() {
+        // the NUL flag byte doesn't count toward the stream: Dune 2000's
+        // t_titl_e.vqa has a relative codebook that ends without a marker
+        assert_eq!(decompress(b"\x00\x82ab", 64).unwrap(), b"ab");
+        assert_eq!(decompress(b"\x00\x82ab\x00\x02", 64).unwrap(), b"ababa");
     }
 
     #[test]

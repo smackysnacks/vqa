@@ -1,24 +1,17 @@
 //! Integration test: parse the container structures of the bundled
 //! wwlogo.vqa and verify them against the file's known layout.
 
-use nom::Parser;
-use nom::bytes::complete::{tag, take_until};
-
-use vqa::{VQAVersion, finf_chunk, form_chunk, vqa_header};
+use vqa::{Chunks, FrameInfo, VQA, VQAHeader, VQAVersion};
 
 #[test]
 fn parses_wwlogo_header_and_frame_index() {
     let buffer = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/wwlogo.vqa"))
         .expect("failed to read wwlogo.vqa");
 
-    let (rest, form) = form_chunk(&buffer).expect("failed to parse FORM chunk");
-    assert_eq!(form.size as usize, buffer.len() - 8);
+    let vqa = VQA::parse(&buffer).expect("failed to parse the container");
+    assert_eq!(vqa.form_size as usize, buffer.len() - 8);
 
-    let (rest, _) = tag::<_, _, nom::error::Error<_>>("WVQA")
-        .parse(rest)
-        .expect("missing WVQA signature");
-
-    let (rest, header) = vqa_header(rest).expect("failed to parse VQA header");
+    let header = &vqa.header;
     assert!(matches!(header.version, VQAVersion::Three));
     assert_eq!(header.flags, 0x001d);
     assert!(header.has_sound());
@@ -30,25 +23,36 @@ fn parses_wwlogo_header_and_frame_index() {
     assert_eq!(header.channels, 2);
     assert_eq!(header.bits, 16);
 
-    // HiColor-era chunks (LINF, CINF) sit between the header and FINF
-    let (rest, _) = take_until::<_, _, nom::error::Error<_>>("FINF")
-        .parse(rest)
-        .expect("no FINF chunk found");
-    let (_, finf) = finf_chunk(rest).expect("failed to parse FINF chunk");
+    // the same header, walked by hand: FORM, its size and WVQA, then the
+    // VQHD chunk
+    assert_eq!(&buffer[..4], b"FORM");
+    assert_eq!(&buffer[8..12], b"WVQA");
+    let vqhd = Chunks::new(&buffer[12..]).next().unwrap().unwrap();
+    assert_eq!(&vqhd.id, b"VQHD");
+    assert_eq!(&VQAHeader::parse(vqhd.data).unwrap(), header);
 
-    assert_eq!(finf.frames.len(), usize::from(header.num_frames));
+    // HiColor-era chunks (LINF, CINF) sit between the header and FINF
+    let chunks: Vec<_> = vqa.chunks().map(Result::unwrap).collect();
+    let finf = chunks.iter().find(|chunk| &chunk.id == b"FINF").unwrap();
+    let (entries, _) = finf.data.as_chunks::<4>();
+    let index: Vec<FrameInfo> = entries
+        .iter()
+        .map(|&entry| FrameInfo::from_raw(u32::from_le_bytes(entry)))
+        .collect();
+    assert_eq!(index.len(), usize::from(header.num_frames));
+    assert_eq!(vqa.frame_index.as_ref(), Some(&index));
 
     // Each frame's data starts with an SN2J sound chunk (or a VQFL
     // full-codebook chunk at scene cuts); every decoded offset must land
     // exactly on one, in increasing order
     let mut previous = 0;
-    for frame in &finf.frames {
+    for frame in &index {
         let offset = frame.offset as usize;
         assert!(offset > previous, "frame offsets must increase");
-        let fourcc = &buffer[offset..offset + 4];
-        assert!(fourcc == b"SN2J" || fourcc == b"VQFL");
+        let chunk = chunks.iter().find(|chunk| chunk.offset == offset).unwrap();
+        assert!(&chunk.id == b"SN2J" || &chunk.id == b"VQFL");
         assert!(!frame.has_palette, "HiColor movies carry no palettes");
         previous = offset;
     }
-    assert_eq!(finf.frames[0].offset, 682);
+    assert_eq!(index[0].offset, 682);
 }

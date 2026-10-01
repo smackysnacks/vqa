@@ -1,6 +1,6 @@
 # vqa
 
-[![CI](https://github.com/smackysnacks/vqa-parser/actions/workflows/rust.yml/badge.svg)](https://github.com/smackysnacks/vqa-parser/actions/workflows/rust.yml)
+[![CI](https://github.com/smackysnacks/vqa/actions/workflows/rust.yml/badge.svg)](https://github.com/smackysnacks/vqa/actions/workflows/rust.yml)
 [![crates.io](https://img.shields.io/crates/v/vqa.svg)](https://crates.io/crates/vqa)
 [![Crates.io Total Downloads](https://img.shields.io/crates/d/vqa)](https://crates.io/crates/vqa)
 [![docs.rs](https://img.shields.io/docsrs/vqa)](https://docs.rs/vqa)
@@ -19,11 +19,11 @@ Tiberian Sun, and Nox.
 |-----------|-------------------------------------------------------------------------------------------------|
 | Container | All three versions (v1–v3), both 8-bit and HiColor movies                                        |
 | Video     | 8-bit palettized (`VPT?` pointer tables) and 15-bit HiColor (`VPTR`/`VPRZ` command streams, including the Blade Runner alpha-skip commands) |
-| Audio     | IMA ADPCM (`SND2`) and raw PCM (`SND0`); Westwood ADPCM (`SND1`, early 8-bit-audio movies) is not supported yet |
+| Audio     | IMA ADPCM (`SND2`), Westwood ADPCM (`SND1`, early 8-bit-audio movies), and raw PCM (`SND0`) |
 
 Malformed input fails with an error rather than panicking, and allocation
 sizes taken from the file are capped, so the crate is safe to run on
-untrusted data (see `fuzz/`).
+untrusted data.
 
 ## Quick start
 
@@ -53,11 +53,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For consumers that want to walk the container themselves, the `parser`
-module exposes zero-copy [nom](https://crates.io/crates/nom) parsers for
-every chunk type, with `lcw` (LCW/"Format80" decompression), `video`
-(`FrameDecoder`), and `audio` (IMA ADPCM) as the decoding layers underneath.
-See the [API docs](https://docs.rs/vqa) for the full tour.
+For consumers that want to walk the container themselves, `Chunks` walks
+any run of chunks zero-copy, and `Chunk::sub_chunks` the chunks nested in
+one. `FrameDecoder`, `lcw` (LCW/"Format80" decompression), and `audio` (IMA
+and Westwood ADPCM) are the decoding layers underneath. See the
+[API docs](https://docs.rs/vqa) for the full tour.
+
+## Performance
+
+A 640x400 frame decodes in 25–50 µs on a current desktop CPU, over a
+thousand times faster than the movies play. Drawing 8-bit frames and
+converting HiColor frames to RGB use SIMD through
+[fearless_simd](https://crates.io/crates/fearless_simd): AVX-512, AVX2,
+SSE4.2 or SSE2 on x86, chosen at run time, so a build for generic x86-64
+runs as fast as one for the host CPU, and NEON on 64-bit ARM.
+
+WebAssembly has no run-time detection, so enable `simd128` when building
+for it; every major browser, Node and wasmtime support it. Without it, the
+crate falls back to scalar code, which on wasm32 draws 8-bit frames 2.6
+times as slowly and converts HiColor frames to RGB three times as slowly:
+
+```sh
+RUSTFLAGS="-C target-feature=+simd128" cargo build --release --target wasm32-unknown-unknown
+```
 
 ## Examples
 
@@ -79,6 +97,18 @@ cargo run --release --example bench -- time examples/wwlogo.vqa
 The examples' audio/video output uses [cpal](https://crates.io/crates/cpal)
 and [minifb](https://crates.io/crates/minifb) (dev-dependencies only; on
 Linux, cpal needs the ALSA headers, e.g. `libasound2-dev`).
+
+## Testing
+
+`cargo test` runs the unit and integration tests. Movies from FFmpeg's
+sample archive, at least one of every version, pixel format and sound codec
+(27 of them from Westwood's games), are checked separately against pinned
+hashes:
+
+```sh
+just samples        # download them into samples/ (31 MB), checking md5s
+just test-samples
+```
 
 ## Format documentation
 

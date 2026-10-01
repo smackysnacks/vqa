@@ -50,6 +50,11 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
+//! [`VQA::decode_audio`] fails on the first malformed chunk. To play a
+//! damaged or cut-off movie as far as it goes, decode the soundtrack chunk
+//! by chunk with [`VQA::audio_chunks`], which yields the sound before the
+//! damage, and frames with [`Frames`], which stops at the first bad one.
+//!
 //! Runnable examples exercise the same API: `player` plays a movie (video
 //! in a window, soundtrack on the default audio device), `dump_frames`
 //! writes every video frame out as PPM, and `bench` times the decoder and
@@ -57,12 +62,16 @@
 //!
 //! # Layers
 //!
-//! - [`movie`]: the high-level API above ([`VQA`], [`Chunks`], [`Frames`]).
-//! - [`parser`]: zero-copy nom parsers for the individual chunks, for
-//!   consumers that want to walk the container themselves.
-//! - [`video`]: [`FrameDecoder`], the stateful codebook/palette/frame
-//!   assembler driving [`Frames`].
-//! - [`audio`]: the IMA ADPCM decoder behind `SND2` sound chunks.
+//! - [`VQA`] with [`Frames`] and [`AudioChunks`]: the high-level API above.
+//! - [`Chunks`]: the zero-copy chunk walk underneath, for consumers that
+//!   want to walk the container themselves. [`VQA::chunks`] walks a movie's
+//!   chunks, [`Chunk::sub_chunks`] the chunks nested in one, and
+//!   [`VQAHeader::parse`] and [`FrameInfo::from_raw`] decode the header and
+//!   the frame index.
+//! - [`FrameDecoder`]: the stateful codebook/palette/frame assembler driving
+//!   [`Frames`].
+//! - [`audio`]: the IMA ADPCM and Westwood ADPCM decoders behind `SND2` and
+//!   `SND1` sound chunks.
 //! - [`lcw`]: LCW ("Format80") decompression, used by every `*Z` chunk.
 //!
 //! # Format support
@@ -70,30 +79,43 @@
 //! All three container versions (v1-v3) parse. Video decoding covers both
 //! the 8-bit palettized scheme (`VPT?` pointer tables) and the HiColor
 //! 15-bit scheme (`VPTR`/`VPRZ` command streams, including the Blade Runner
-//! alpha-skip commands). Audio decoding covers IMA ADPCM (`SND2`) and raw
-//! PCM (`SND0`); Westwood ADPCM (`SND1`, found in early 8-bit-audio movies)
-//! is not supported yet.
+//! alpha-skip commands). Audio decoding covers IMA ADPCM (`SND2`), Westwood
+//! ADPCM (`SND1`, in early 8-bit-audio movies), and raw PCM (`SND0`).
 //!
 //! Malformed input fails with an [`Error`] rather than panicking, and
 //! allocation sizes taken from the file are capped, so the crate is safe to
-//! run on untrusted data (it is continuously fuzzed).
+//! run on untrusted data (it ships cargo-fuzz targets). An error says
+//! what went wrong ([`Error::kind`]) and, where known, where: the frame, the
+//! chunk, and the chunk's byte offset in the file.
 //!
 //! The `doc/` directory of the repository carries the format references this
 //! crate is written against: `vqa.txt` for v1/v2 and `hc-vqa.txt` for the
 //! HiColor scheme.
+//!
+//! # Performance
+//!
+//! Drawing 8-bit frames and converting HiColor frames to RGB use SIMD,
+//! chosen at run time on x86 (AVX-512, AVX2, SSE4.2 or SSE2), and NEON on
+//! 64-bit ARM. WebAssembly has no run-time detection: build with
+//! `-C target-feature=+simd128`, or those paths fall back to scalar code,
+//! which on wasm32 draws 8-bit frames 2.6 times as slowly and converts
+//! HiColor frames three times as slowly.
 
 #![warn(rust_2018_idioms)]
 #![warn(missing_docs)]
+#![warn(clippy::missing_errors_doc)]
 
-pub use error::Error;
-pub use movie::{Chunks, Frames, VQA};
-pub use parser::*;
+pub use chunk::{Chunk, Chunks};
+pub use error::{Error, ErrorKind, Limit, VideoError};
+pub use header::{FrameInfo, VQAHeader, VQAVersion};
+pub use movie::{AudioChunks, Frames, VQA};
 pub use video::{Frame, FrameDecoder, FramePixels, FramePixelsRef, FrameRef};
 
 pub mod audio;
-pub mod error;
+mod chunk;
+mod error;
+mod header;
 pub mod lcw;
-pub mod movie;
-pub mod parser;
+mod movie;
 mod rgb;
-pub mod video;
+mod video;
