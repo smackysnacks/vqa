@@ -31,6 +31,7 @@ use vqa::{Chunk, FrameDecoder, FrameRef, VQA, VQAHeader, VQAVersion, lcw};
 
 const RUNS: usize = 15;
 
+// FNV-1a, as in tests/common, which the published crate leaves out
 const FNV_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 
 fn main() {

@@ -2,15 +2,10 @@
 //! all 130 video frames and the full soundtrack - and verify the output
 //! against known checksums, locking in decoder behavior across refactors.
 
+mod common;
+
+use common::{FNV_BASIS, fnv1a};
 use vqa::{FramePixels, FramePixelsRef, FrameRef, VQA};
-
-const FNV_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-
-fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
-    bytes.iter().fold(hash, |hash, &byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
-    })
-}
 
 fn wwlogo() -> Vec<u8> {
     std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/wwlogo.vqa"))
