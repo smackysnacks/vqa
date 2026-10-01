@@ -274,15 +274,18 @@ fn expand(buffer: &[u8], vqa: &VQA<'_>) -> (Vec<u8>, usize) {
     let mut blocks = 0;
 
     let mut expand_one = |out: &mut Vec<u8>, chunk: &Chunk<'_>| {
+        // the uncompressed ID, and how far the data may expand. Past the
+        // decoder's own bound, a command stream fails as compressed data,
+        // but would decode uncompressed; the other chunks fail either way
         let uncompressed = match &chunk.id {
-            b"VPTZ" | b"VPTK" | b"VPTD" => Some(b"VPT0"),
-            b"VPRZ" => Some(b"VPTR"),
-            b"CBFZ" => Some(b"CBF0"),
-            b"CPLZ" => Some(b"CPL0"),
+            b"VPTZ" | b"VPTK" | b"VPTD" => Some((b"VPT0", 1 << 24)),
+            b"VPRZ" => Some((b"VPTR", blocks_per_frame * 8 + 256)),
+            b"CBFZ" => Some((b"CBF0", 1 << 24)),
+            b"CPLZ" => Some((b"CPL0", 1 << 24)),
             _ => None,
         };
         let expanded =
-            uncompressed.and_then(|id| Some((id, lcw::decompress(chunk.data, 1 << 24).ok()?)));
+            uncompressed.and_then(|(id, max)| Some((id, lcw::decompress(chunk.data, max).ok()?)));
         let (id, data) = match &expanded {
             Some((id, data)) => (*id, data.as_slice()),
             None => (&chunk.id, chunk.data),
