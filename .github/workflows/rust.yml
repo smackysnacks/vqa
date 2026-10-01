@@ -87,6 +87,14 @@ jobs:
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir ${{ github.workspace }}
 
+      # again with simd128, as the README says to build for wasm: the run
+      # above covers the scalar fallback, this one the wasm SIMD kernels
+      - name: Run tests with simd128
+        run: cargo test --target wasm32-wasip1 --target-dir target/wasm-simd128
+        env:
+          RUSTFLAGS: -C target-feature=+simd128
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run --dir ${{ github.workspace }}
+
   # Retail movies from FFmpeg's sample archive against pinned hashes (see
   # tests/samples.rs); the download is cached until tests/samples.txt changes
   samples:
