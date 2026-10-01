@@ -405,6 +405,19 @@ enum FrameData<'a> {
     Table(Chunk<'a>),
 }
 
+impl<'a> FrameData<'a> {
+    /// The frame `chunk` holds, if it's a frame's own chunk.
+    fn of(chunk: Chunk<'a>) -> Option<FrameData<'a>> {
+        match &chunk.id {
+            b"VQFR" | b"VQFK" => Some(FrameData::Container(chunk)),
+            // the older layout, without VQFR containers: each frame's
+            // sub-chunks at the top level, ending at its pointer table
+            b"VPT0" | b"VPTZ" | b"VPTK" | b"VPTD" => Some(FrameData::Table(chunk)),
+            _ => None,
+        }
+    }
+}
+
 impl<'a> Frames<'a> {
     /// Decode the next frame and borrow it from the decoder: [`Iterator::next`]
     /// without the copy. The frame is valid until the next call.
@@ -453,14 +466,12 @@ impl<'a> Frames<'a> {
                 Ok(chunk) => chunk,
                 Err(e) => return Some(Err(e)),
             };
+            if let Some(data) = FrameData::of(chunk) {
+                return Some(Ok(data));
+            }
             let applied = match &chunk.id {
-                b"VQFR" | b"VQFK" => return Some(Ok(FrameData::Container(chunk))),
                 b"VQFL" => self.decoder.apply_side_chunks(chunk.sub_chunks()),
-                // the older layout, without VQFR containers: each frame's
-                // sub-chunks at the top level, ending at its pointer table
-                b"VPT0" | b"VPTZ" | b"VPTK" | b"VPTD" => {
-                    return Some(Ok(FrameData::Table(chunk)));
-                }
+                // the older layout's codebooks and palettes, at the top level
                 b"CBF0" | b"CBFZ" | b"CBP0" | b"CBPZ" | b"CPL0" | b"CPLZ" => self
                     .decoder
                     .frame_chunk(&chunk)
@@ -476,6 +487,7 @@ impl<'a> Frames<'a> {
     /// Swap in the codebook parts staged so far if the CINF schedule starts
     /// a codebook at the next frame.
     fn start_frame(&mut self) -> Result<(), Error> {
+        let mut due = false;
         // each entry: the little-endian start frame, then a compressed size
         while let Some((entry, rest)) = self.codebook_schedule.split_first_chunk::<6>() {
             let start = usize::from(u16::from_le_bytes([entry[0], entry[1]]));
@@ -483,11 +495,21 @@ impl<'a> Frames<'a> {
                 break;
             }
             self.codebook_schedule = rest;
-            if start == self.frame {
-                self.decoder.swap_in_codebook_parts()?;
-            }
+            due |= start == self.frame;
+        }
+        // a codebook starting past the last frame is never drawn: there
+        // is no frame to fail
+        if due && self.frame_ahead() {
+            self.decoder.swap_in_codebook_parts()?;
         }
         Ok(())
+    }
+
+    /// Whether another frame follows in the chunks still to walk, up to
+    /// the first that can't be walked.
+    fn frame_ahead(&self) -> bool {
+        let mut chunks = self.chunks.clone().map_while(Result::ok);
+        chunks.any(|chunk| FrameData::of(chunk).is_some())
     }
 }
 

@@ -1035,6 +1035,23 @@ fn frames_swap_in_codebook_parts_where_the_cinf_schedule_starts_a_codebook() {
 }
 
 #[test]
+fn a_codebook_scheduled_after_the_last_frame_is_never_swapped_in() {
+    // the schedule names frame 1 of a one-frame movie, whose parts would
+    // fail to join (an LCW long copy cut short): with no frame 1 to draw,
+    // there is no swap to fail, and the frames end after frame 0
+    let frame = vqfr(&[
+        chunk(b"CBF0", &codebook(0)),
+        chunk(b"CBPZ", &[0xff]),
+        chunk(b"VPT0", &TWO_ENTRY_TABLE),
+    ]);
+    let file = movie(&header_8bit(), &[cinf(&[0, 1]), frame]);
+    let vqa = VQA::parse(&file).unwrap();
+    let mut frames = vqa.frames().unwrap();
+    assert_eq!(indexed(frames.next()).0, two_entry_frame(0));
+    assert!(frames.next().is_none());
+}
+
+#[test]
 fn cinf_schedule_applies_before_a_frames_own_chunks_in_either_layout() {
     // Westwood's loader fixes a frame's codebook before reading any of its
     // chunks (LOADER.CPP: curframe->Codebook = loader->FullCB), so the part
