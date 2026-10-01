@@ -20,8 +20,8 @@ This release also breaks the API, once, so later releases don't have to:
 - The header's unknown fields have Westwood's own names.
 - Each public item has one path.
 
-[Migrating from 0.6](#migrating-from-06) lists what to change. Decoding
-output is unchanged.
+[Migrating from 0.6](#migrating-from-06) lists what to change. Apart from
+the fixes below, decoding output is unchanged.
 
 ### Added
 
@@ -125,7 +125,10 @@ output is unchanged.
 - 8-bit movies with 4x4 blocks and at most 0x0f00 codebook entries (some
   of Lands of Lore's) failed on their first frame. The marker for a
   solid-color block now depends on the block size (0x0f for 4x2 blocks,
-  0xff for 4x4) rather than on the header's `maxblocks`.
+  0xff for 4x4) rather than on the header's `maxblocks`. So 4x2 movies
+  whose header allows more than 0x0f00 entries now mark solid-color
+  blocks with 0x0f, as Westwood's own 4x2 drawer does, rather than 0xff.
+  None of the sample movies is one of them.
 - `FrameInfo::offset` masked FINF entries with `0x3FFFFFFF`, so an entry
   with its sync flag (bit 29) or bit 28 set got a wrong offset. The top
   four bits are flags, as in Westwood's own VQA library.
