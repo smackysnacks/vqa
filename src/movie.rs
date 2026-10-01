@@ -101,24 +101,22 @@ impl<'a> VQA<'a> {
         let body_offset = buffer.len() - body.len();
 
         // the frame index (FINF) and codebook schedule (CINF) sit between
-        // the header and the first frame's data, possibly behind chunks we
-        // have no use for (LINF, PINF, ...)
+        // the header and the first frame's data, in either order, possibly
+        // among chunks we have no use for (LINF, PINF, ...). A FINF chunk is
+        // looked for further on too
         let mut frame_index = None;
-        let mut codebook_schedule: &[u8] = &[];
+        let mut codebook_schedule = None;
+        let mut in_frames = false;
         for chunk in Chunks::at(body, body_offset).map_while(Result::ok) {
             match &chunk.id {
-                b"CINF" => codebook_schedule = cind_entries(&chunk),
-                b"FINF" => {
-                    let (entries, _) = chunk.data.as_chunks::<4>();
-                    frame_index = Some(
-                        entries
-                            .iter()
-                            .map(|&entry| FrameInfo::from_raw(u32::from_le_bytes(entry)))
-                            .collect(),
-                    );
-                    break;
+                b"CINF" if codebook_schedule.is_none() => {
+                    codebook_schedule = Some(cind_entries(&chunk));
                 }
-                _ => {}
+                b"FINF" if frame_index.is_none() => frame_index = Some(finf_entries(&chunk)),
+                id => in_frames |= is_frame_data(id),
+            }
+            if frame_index.is_some() && (codebook_schedule.is_some() || in_frames) {
+                break;
             }
         }
 
@@ -128,7 +126,7 @@ impl<'a> VQA<'a> {
             frame_index,
             body,
             body_offset,
-            codebook_schedule,
+            codebook_schedule: codebook_schedule.unwrap_or_default(),
         })
     }
 
@@ -519,6 +517,40 @@ impl<'a> Frames<'a> {
         let mut chunks = self.chunks.clone().map_while(Result::ok);
         chunks.any(|chunk| FrameData::of(chunk).is_some())
     }
+}
+
+/// Whether `id` is the ID of a chunk of the frames' data, which follows the
+/// frame index and codebook schedule: a frame, its sound, or a codebook or
+/// palette of the older top-level layout.
+fn is_frame_data(id: &[u8; 4]) -> bool {
+    matches!(
+        id,
+        b"VQFR"
+            | b"VQFK"
+            | b"VQFL"
+            | b"SND0"
+            | b"SND1"
+            | b"SND2"
+            | b"VPT0"
+            | b"VPTZ"
+            | b"VPTK"
+            | b"VPTD"
+            | b"CBF0"
+            | b"CBFZ"
+            | b"CBP0"
+            | b"CBPZ"
+            | b"CPL0"
+            | b"CPLZ"
+    )
+}
+
+/// The frame index a FINF chunk holds.
+fn finf_entries(finf: &Chunk<'_>) -> Vec<FrameInfo> {
+    let (entries, _) = finf.data.as_chunks::<4>();
+    entries
+        .iter()
+        .map(|&entry| FrameInfo::from_raw(u32::from_le_bytes(entry)))
+        .collect()
 }
 
 /// The entries of a CINF chunk's nested CIND chunk, 6 bytes each (a

@@ -1131,6 +1131,37 @@ fn codebook_starts_lists_the_cind_start_frames() {
 }
 
 #[test]
+fn a_cinf_chunk_after_the_finf_one_still_schedules_codebooks() {
+    // the frame index and the codebook schedule both come before the first
+    // frame's data. Every sample movie has CINF first, but either order
+    // must do
+    let table = chunk(b"VPT0", &TWO_ENTRY_TABLE);
+    let new = codebook(20);
+    let file = movie(
+        &header_8bit(),
+        &[
+            chunk(b"FINF", &[0; 12]),
+            chunk(b"PINF", &[0; 2]),
+            cinf(&[0, 2]),
+            vqfr(&[
+                chunk(b"CBF0", &codebook(0)),
+                chunk(b"CBP0", &new[..5]),
+                table.clone(),
+            ]),
+            vqfr(&[chunk(b"CBP0", &new[5..]), table.clone()]),
+            vqfr(&[table]),
+        ],
+    );
+    let vqa = VQA::parse(&file).unwrap();
+    assert_eq!(vqa.frame_index.as_ref().map(Vec::len), Some(3));
+    assert_eq!(vqa.codebook_starts().collect::<Vec<_>>(), [0, 2]);
+    assert_eq!(
+        all_frames(&file),
+        [two_entry_frame(0), two_entry_frame(0), two_entry_frame(20)]
+    );
+}
+
+#[test]
 fn frames_decode_vqfk_key_frames_and_vptk_and_vptd_tables() {
     // Westwood's VQA loader (WINVQ/VQA32/LOADER.CPP in EA's GPL Red Alert
     // source) reads a VQFK chunk like a VQFR, flagging a key frame, and
