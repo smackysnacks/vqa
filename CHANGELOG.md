@@ -142,7 +142,8 @@ the fixes below, decoding output is unchanged.
   release builds wrapped around silently. The position now saturates, so a
   write past the frame fails with an error, as on 64-bit targets.
 - The `dump_frames` example no longer panics on a step of `0` or a malformed
-  step.
+  step, or on a frame that fails to decode. It now reports the error and
+  exits with status 1, keeping the frames it wrote before.
 - The `FramePixels::HiColor` docs said the top bit of every pixel is clear.
   Plain block writes copy a codebook pixel whole, that bit included, while
   the alpha-skip writes leave out the pixels that have it (Blade Runner's

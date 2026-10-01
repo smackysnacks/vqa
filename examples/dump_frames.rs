@@ -41,7 +41,14 @@ fn main() {
     let mut rgb = Vec::new();
     let mut i = 0;
     while let Some(frame) = frames.next_ref() {
-        let frame = frame.expect("failed to decode frame");
+        // a damaged movie gives up the frames before the bad one, and fails
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        };
         if i % every == 0 {
             rgb.resize(frame.width * frame.height * 3, 0);
             frame.write_rgb888(&mut rgb);
