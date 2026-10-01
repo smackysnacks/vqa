@@ -46,7 +46,7 @@ pub struct VQA<'a> {
     body_offset: usize,
     /// The CIND entries of the CINF chunk, the frames where each codebook
     /// takes over; see [`Frames`]
-    codebook_schedule: &'a [u8],
+    codebook_schedule: &'a [CindEntry],
 }
 
 impl fmt::Debug for VQA<'_> {
@@ -227,11 +227,7 @@ impl<'a> VQA<'a> {
     /// [`FrameDecoder::swap_in_codebook_parts`] before decoding each of
     /// these frames.
     pub fn codebook_starts(&self) -> impl Iterator<Item = u16> + 'a {
-        self.codebook_schedule
-            .as_chunks::<6>()
-            .0
-            .iter()
-            .map(|entry| u16::from_le_bytes([entry[0], entry[1]]))
+        self.codebook_schedule.iter().map(cind_start)
     }
 
     /// Decode the soundtrack one sound chunk at a time: what
@@ -432,7 +428,7 @@ pub struct Frames<'a> {
     chunks: Chunks<'a>,
     decoder: FrameDecoder,
     /// the CIND entries not yet reached
-    codebook_schedule: &'a [u8],
+    codebook_schedule: &'a [CindEntry],
     /// the number of the next frame
     frame: usize,
     done: bool,
@@ -528,9 +524,8 @@ impl<'a> Frames<'a> {
     /// a codebook at the next frame.
     fn start_frame(&mut self) -> Result<(), Error> {
         let mut due = false;
-        // each entry: the little-endian start frame, then a compressed size
-        while let Some((entry, rest)) = self.codebook_schedule.split_first_chunk::<6>() {
-            let start = usize::from(u16::from_le_bytes([entry[0], entry[1]]));
+        while let Some((entry, rest)) = self.codebook_schedule.split_first() {
+            let start = usize::from(cind_start(entry));
             if start > self.frame {
                 break;
             }
@@ -587,15 +582,23 @@ fn finf_entries(finf: &Chunk<'_>) -> Vec<FrameInfo> {
         .collect()
 }
 
-/// The entries of a CINF chunk's nested CIND chunk, 6 bytes each (a
-/// little-endian `u16` start frame and `u32` compressed codebook size), or
-/// none if the chunk doesn't parse.
-fn cind_entries<'a>(cinf: &Chunk<'a>) -> &'a [u8] {
+/// An entry of a CIND chunk: a little-endian `u16` start frame, then a
+/// `u32` compressed codebook size.
+type CindEntry = [u8; 6];
+
+/// The entries of a CINF chunk's nested CIND chunk, or none if the chunk
+/// doesn't parse.
+fn cind_entries<'a>(cinf: &Chunk<'a>) -> &'a [CindEntry] {
     let cind = cinf
         .sub_chunks()
         .map_while(Result::ok)
         .find(|chunk| &chunk.id == b"CIND");
-    cind.map_or(&[], |chunk| chunk.data.as_chunks::<6>().0.as_flattened())
+    cind.map_or(&[], |chunk| chunk.data.as_chunks().0)
+}
+
+/// The frame where the codebook a CIND entry schedules takes over.
+fn cind_start(entry: &CindEntry) -> u16 {
+    u16::from_le_bytes([entry[0], entry[1]])
 }
 
 impl Iterator for Frames<'_> {
