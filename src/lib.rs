@@ -84,7 +84,7 @@
 //!
 //! Malformed input fails with an [`Error`] rather than panicking, and
 //! allocation sizes taken from the file are capped, so the crate is safe to
-//! run on untrusted data (its fuzz targets run nightly in CI). An error says
+//! run on untrusted data (it ships cargo-fuzz targets). An error says
 //! what went wrong ([`Error::kind`]) and, where known, where: the frame, the
 //! chunk, and the chunk's byte offset in the file.
 //!

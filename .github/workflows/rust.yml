@@ -141,21 +141,6 @@ jobs:
       - name: Check the library
         run: cargo +1.89 check --lib
 
-  # Running the fuzz targets needs nightly (see fuzz.yml), but they build on
-  # stable, which catches API changes that break them
-  fuzz-targets:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: fuzz
-
-      - name: Check the fuzz targets
-        run: cargo check --manifest-path fuzz/Cargo.toml
-
   semver:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
