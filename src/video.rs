@@ -297,9 +297,9 @@ pub struct FrameDecoder {
     max_codebook_bytes: usize,
     /// parts making up one full codebook (0 = full codebooks only)
     cbparts: usize,
-    /// current codebook - 8-bit movies store palette indices, the
-    /// codebook's `entries8` entries and then one solid-color entry per
-    /// color, which fill blocks draw...
+    /// current codebook - 8-bit movies store palette indices: one
+    /// solid-color entry per color, which fill blocks draw, built once, and
+    /// then the codebook's `entries8` entries...
     codebook8: Vec<u8>,
     entries8: usize,
     /// ...HiColor movies 15-bit pixels
@@ -369,7 +369,7 @@ impl FrameDecoder {
             codebook8: if hicolor {
                 Vec::new()
             } else {
-                with_fill_entries(Vec::new(), block_w * block_h)
+                fill_entries(block_w * block_h)
             },
             entries8: 0,
             codebook16: Vec::new(),
@@ -552,18 +552,18 @@ impl FrameDecoder {
         } else {
             staged
         };
-        self.set_codebook(bytes)
+        self.set_codebook(&bytes)
     }
 
     /// Handle the non-pointer sub-chunks: codebooks, codebook parts, and
     /// palettes. Anything unrecognized is skipped.
     fn side_chunk(&mut self, chunk: &Chunk<'_>) -> Result<(), ErrorKind> {
         match &chunk.id {
-            b"CBF0" => self.set_codebook(chunk.data.to_vec()),
+            b"CBF0" => self.set_codebook(chunk.data),
             b"CBFZ" => {
                 let too_large = ErrorKind::TooLarge(Limit::Codebook);
                 let data = decompress(chunk.data, self.max_codebook_bytes, too_large)?;
-                self.set_codebook(data)
+                self.set_codebook(&data)
             }
             b"CBP0" | b"CBPZ" => self.stage_codebook_part(chunk),
             b"CPL0" => self.set_palette(chunk.data),
@@ -584,7 +584,7 @@ impl FrameDecoder {
         self.blocks_x * self.blocks_y * 2
     }
 
-    fn set_codebook(&mut self, mut bytes: Vec<u8>) -> Result<(), ErrorKind> {
+    fn set_codebook(&mut self, bytes: &[u8]) -> Result<(), ErrorKind> {
         if bytes.len() > self.max_codebook_bytes {
             return Err(ErrorKind::TooLarge(Limit::Codebook));
         }
@@ -592,7 +592,7 @@ impl FrameDecoder {
         // last entry (CBFZ chunks in retail HiColor movies); drop the partial
         // entry instead of rejecting the codebook, like the original players
         let entry_bytes = self.entry_len() * if self.hicolor { 2 } else { 1 };
-        bytes.truncate(bytes.len() - bytes.len() % entry_bytes);
+        let bytes = &bytes[..bytes.len() - bytes.len() % entry_bytes];
         if self.hicolor {
             self.codebook16 = bytes
                 .as_chunks::<2>()
@@ -601,8 +601,11 @@ impl FrameDecoder {
                 .map(|&p| u16::from_le_bytes(p))
                 .collect();
         } else {
+            // the fill entries in front stay: a swap costs only the
+            // codebook, however large the blocks
             self.entries8 = bytes.len() / entry_bytes;
-            self.codebook8 = with_fill_entries(bytes, entry_bytes);
+            self.codebook8.truncate(256 * entry_bytes);
+            self.codebook8.extend_from_slice(bytes);
         }
         Ok(())
     }
@@ -990,22 +993,21 @@ fn put_line(dst: &mut [u16], src: &[u16], alpha_skip: bool) {
     }
 }
 
-/// `codebook` followed by one solid-color entry of `entry` bytes per color,
-/// in color order.
-fn with_fill_entries(mut codebook: Vec<u8>, entry: usize) -> Vec<u8> {
-    codebook.reserve(256 * entry);
+/// One solid-color entry of `entry` bytes per color, in color order.
+fn fill_entries(entry: usize) -> Vec<u8> {
+    let mut entries = Vec::with_capacity(256 * entry);
     for color in 0..=255 {
-        codebook.extend(std::iter::repeat_n(color, entry));
+        entries.extend(std::iter::repeat_n(color, entry));
     }
-    codebook
+    entries
 }
 
-// Where the blocks of a row of an 8-bit pointer table draw from: each
-// block's codebook entry, or for a fill block the solid-color entry of its
-// color after the codebook's `entries` own. Each gives how many of the
-// row's leading blocks can be drawn: all of them, or those before the first
-// that indexes past the codebook. The vector versions take 16 blocks at a
-// time, with no branch between fills and copies.
+// Where the blocks of a row of an 8-bit pointer table draw from: for a fill
+// block the solid-color entry of its color, and for the rest their
+// codebook entry, after the 256 solid-color ones. Each gives how many of
+// the row's leading blocks can be drawn: all of them, or those before the
+// first that indexes past the codebook's `entries`. The vector versions take
+// 16 blocks at a time, with no branch between fills and copies.
 
 /// The sources of a row of a v2 pointer table, from its LoVal (`lo`) and
 /// HiVal (`hi`) bytes. A HiVal of `fill` marks a fill with color LoVal.
@@ -1030,7 +1032,7 @@ fn split_sources<S: Simd>(
             .bitcast();
         let is_fill = (index >> 8).simd_eq(u16x16::splat(simd, u16::from(fill)));
         let is_bad = !is_fill & index.simd_ge(entries_v);
-        store_sources(simd, is_fill, index & 0xff, index, entries_v, out);
+        store_sources(simd, is_fill, index & 0xff, index, out);
         if is_bad.any_true() {
             return i * 16 + is_bad.to_bitmask().trailing_zeros() as usize;
         }
@@ -1043,8 +1045,8 @@ fn split_sources_scalar(lo: &[u8], hi: &[u8], fill: u8, entries: usize, out: &mu
     for (i, ((&lo, &hi), out)) in lo.iter().zip(hi).zip(out).enumerate() {
         let index = usize::from(hi) << 8 | usize::from(lo);
         *out = match hi == fill {
-            true => entries + usize::from(lo),
-            false if index < entries => index,
+            true => usize::from(lo),
+            false if index < entries => 256 + index,
             false => return i,
         } as u32;
     }
@@ -1064,7 +1066,7 @@ fn interleaved_sources<S: Simd>(simd: S, words: &[u8], entries: usize, out: &mut
         let is_fill = (word >> 8).simd_eq(u16x16::splat(simd, 0xff));
         let index = word >> 3;
         let is_bad = !is_fill & index.simd_ge(entries_v);
-        store_sources(simd, is_fill, (word & 0xff) ^ 0xff, index, entries_v, out);
+        store_sources(simd, is_fill, (word & 0xff) ^ 0xff, index, out);
         if is_bad.any_true() {
             return i * 16 + is_bad.to_bitmask().trailing_zeros() as usize;
         }
@@ -1078,28 +1080,28 @@ fn interleaved_sources_scalar(words: &[u8], entries: usize, out: &mut [u32]) -> 
     for (i, (&[lo, hi], out)) in words.iter().zip(out).enumerate() {
         let index = (usize::from(hi) << 8 | usize::from(lo)) / 8;
         *out = match hi == 0xff {
-            true => entries + usize::from(255 - lo),
-            false if index < entries => index,
+            true => usize::from(255 - lo),
+            false if index < entries => 256 + index,
             false => return i,
         } as u32;
     }
     words.len()
 }
 
-/// Store 16 blocks' sources: `color` for the fills (`is_fill`), offset by
-/// the codebook's `entries`, and `index` for the rest. Fills can land past
-/// what 16 bits hold, so the sources widen to 32.
+/// Store 16 blocks' sources: `color` for the fills (`is_fill`), and `index`
+/// for the rest, offset past the 256 solid-color entries. That can land
+/// past what 16 bits hold, so the sources widen to 32.
 #[inline(always)]
 fn store_sources<S: Simd>(
     simd: S,
     is_fill: mask16x16<S>,
     color: u16x16<S>,
     index: u16x16<S>,
-    entries: u16x16<S>,
     out: &mut [u32; 16],
 ) {
     let (base_lo, base_hi) = simd.widen_u16x16(is_fill.select(color, index));
-    let (offset_lo, offset_hi) = simd.widen_u16x16(is_fill.select(entries, u16x16::splat(simd, 0)));
+    let offset = is_fill.select(u16x16::splat(simd, 0), u16x16::splat(simd, 256));
+    let (offset_lo, offset_hi) = simd.widen_u16x16(offset);
     let (out_lo, out_hi) = out.split_at_mut(8);
     (base_lo + offset_lo).store_slice(out_lo);
     (base_hi + offset_hi).store_slice(out_hi);
@@ -1185,8 +1187,9 @@ fn copy_blocks<const BW: usize, const BH: usize>(
     entries: &[[[u8; BW]; BH]],
     sources: &[u32],
 ) {
-    // the clamp never bites: a source is past the codebook's own entries
-    // only if it's a fill's, and there are 256 of those after them
+    // the clamp never bites: a fill's source is its color, and any other
+    // was checked against the codebook's entries, which follow the 256
+    // solid-color ones
     let Some(last) = entries.len().checked_sub(1) else {
         return;
     };

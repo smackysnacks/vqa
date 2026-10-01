@@ -672,6 +672,66 @@ fn vqfl_codebook_and_palette_apply_to_the_frames_that_follow() {
     assert_eq!(indexed(&frame), (&NEW_FRAME[..], &[[0, 0xff, 0]][..]));
 }
 
+#[test]
+fn fills_and_entries_draw_alike_as_codebooks_grow_and_shrink() {
+    // the decoder keeps a solid-color entry per color next to the
+    // codebook; each new codebook, larger or smaller, must leave both
+    // where the table finds them
+    let mut decoder = FrameDecoder::new(&header_8bit()).unwrap();
+    // blocks: fill with color 9, entry 1, entry 0, fill with color 255
+    let table = chunk(b"VPT0", &[9, 1, 0, 255, /* HiVal */ 0x0f, 0, 0, 0x0f]);
+    for (n, count) in (1..).zip([2, 300, 2, 0x0f00, 2]) {
+        let m = n + 100;
+        let book = codebook_4x2(count, &[(0, [n; 8]), (1, [m; 8])]);
+        let frame = decoder
+            .decode_frame(&[chunk(b"CBF0", &book), table.clone()].concat())
+            .unwrap();
+        #[rustfmt::skip]
+        assert_eq!(pixels(&frame), [
+            9, 9, 9, 9,   m,   m,   m,   m,
+            9, 9, 9, 9,   m,   m,   m,   m,
+            n, n, n, n,   255, 255, 255, 255,
+            n, n, n, n,   255, 255, 255, 255,
+        ], "codebook {n}, of {count} entries");
+    }
+
+    // an empty codebook still leaves the fills
+    let fills = chunk(b"VPT0", &[1, 2, 3, 4, /* HiVal */ 0x0f, 0x0f, 0x0f, 0x0f]);
+    let frame = decoder
+        .decode_frame(&[chunk(b"CBF0", &[]), fills].concat())
+        .unwrap();
+    #[rustfmt::skip]
+    assert_eq!(pixels(&frame), [
+        1, 1, 1, 1,   2, 2, 2, 2,
+        1, 1, 1, 1,   2, 2, 2, 2,
+        3, 3, 3, 3,   4, 4, 4, 4,
+        3, 3, 3, 3,   4, 4, 4, 4,
+    ]);
+}
+
+#[test]
+fn codebook_swaps_cost_only_the_codebook_whatever_the_block_size() {
+    // a swap used to rebuild the 256 solid-color entries after the new
+    // codebook: 16.6 MB with 255x255 blocks, so these 16 KB of empty
+    // codebooks took seconds in a release build, and this test over two
+    // minutes in a debug one
+    let header = VQAHeader {
+        width: 255,
+        height: 255,
+        block_width: 255,
+        block_height: 255,
+        ..header_8bit()
+    };
+    let mut decoder = FrameDecoder::new(&header).unwrap();
+    decoder
+        .process_vqfl(&chunk(b"CBF0", &[]).repeat(2000))
+        .unwrap();
+
+    // the one block, filled with color 7
+    let frame = decoder.decode_frame(&chunk(b"VPT0", &[7, 0x0f])).unwrap();
+    assert!(pixels(&frame).iter().all(|&p| p == 7));
+}
+
 /// A 4x2 movie of a single 4x2 block.
 fn rgb_header() -> VQAHeader {
     VQAHeader {
