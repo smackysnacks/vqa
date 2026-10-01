@@ -2,6 +2,8 @@
 //! decoded video frames or decode the soundtrack without hand-walking the
 //! chunks, the FINF transforms, or the per-version stereo layouts.
 
+use std::fmt;
+
 use crate::audio::{CodecState, decompress_into, westwood};
 use crate::chunk::{Chunk, Chunks, is_chunk_id};
 use crate::error::{Error, ErrorKind, Limit};
@@ -29,7 +31,7 @@ fn is_cut_off_form(start: &[u8]) -> bool {
 }
 
 /// A parsed VQA movie, borrowing the file's bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct VQA<'a> {
     /// The FORM container size
     pub form_size: u32,
@@ -45,6 +47,23 @@ pub struct VQA<'a> {
     /// The CIND entries of the CINF chunk, the frames where each codebook
     /// takes over; see [`Frames`]
     codebook_schedule: &'a [u8],
+}
+
+impl fmt::Debug for VQA<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // the body's length rather than its bytes, the rest of the file
+        f.debug_struct("VQA")
+            .field("form_size", &self.form_size)
+            .field("header", &self.header)
+            .field("frame_index", &self.frame_index)
+            .field("body_offset", &self.body_offset)
+            .field("body_len", &self.body.len())
+            .field(
+                "codebook_starts",
+                &self.codebook_starts().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl<'a> VQA<'a> {
@@ -245,7 +264,7 @@ impl<'a> VQA<'a> {
 /// sound data in a chunk always decodes.
 ///
 /// Cloning saves the decoding position, IMA ADPCM predictors included.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AudioChunks<'a> {
     chunks: Chunks<'a>,
     version: VQAVersion,
@@ -257,6 +276,21 @@ pub struct AudioChunks<'a> {
     /// scratch space for unsigned 8-bit SND1 samples
     bytes: Vec<u8>,
     done: bool,
+}
+
+impl fmt::Debug for AudioChunks<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // without the scratch space, which holds a whole SND1 chunk's samples
+        f.debug_struct("AudioChunks")
+            .field("chunks", &self.chunks)
+            .field("version", &self.version)
+            .field("stereo", &self.stereo)
+            .field("pcm16", &self.pcm16)
+            .field("left", &self.left)
+            .field("right", &self.right)
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AudioChunks<'_> {
@@ -648,6 +682,21 @@ mod tests {
             }
         }
         samples
+    }
+
+    #[test]
+    fn debug_shows_lengths_rather_than_the_movie() {
+        // printing every byte would take 3 characters or more for each
+        let file = movie(2, 1, &[vec![0x77; 1000]]);
+        let vqa = VQA::parse(&file).unwrap();
+        let debug = format!("{vqa:?}");
+        assert!(debug.contains("body_offset: 62, body_len: 1008"), "{debug}");
+        assert!(debug.len() < 1000, "{debug}");
+
+        let debug = format!("{:?}", vqa.audio_chunks());
+        let chunks = "chunks: Chunks { offset: 62, len: 1008, nested: false }";
+        assert!(debug.contains(chunks), "{debug}");
+        assert!(debug.len() < 1000, "{debug}");
     }
 
     #[test]

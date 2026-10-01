@@ -54,6 +54,18 @@ impl fmt::Debug for Chunk<'_> {
     }
 }
 
+impl fmt::Debug for Chunks<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // the length rather than the input left to walk, which can run to
+        // the rest of the file
+        f.debug_struct("Chunks")
+            .field("offset", &self.offset)
+            .field("len", &self.input.len())
+            .field("nested", &self.nested)
+            .finish()
+    }
+}
+
 /// Iterator over consecutive chunks, such as the body of a movie
 /// ([`VQA::chunks`](crate::VQA::chunks)) or the payload of a container chunk
 /// ([`Chunk::sub_chunks`]).
@@ -73,7 +85,7 @@ impl fmt::Debug for Chunk<'_> {
 ///
 /// [`Error::offset`] is where the bad chunk starts, and [`Error::chunk`]
 /// its ID, if all four bytes of a valid one are there.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Chunks<'a> {
     input: &'a [u8],
     /// the offset of `input` from where the walk's offsets count
@@ -321,6 +333,13 @@ mod tests {
         assert_eq!(
             format!("{chunk:?}"),
             r#"Chunk { id: "SND2", offset: 0, len: 4 }"#
+        );
+
+        let mut chunks = Chunks::new(b"SND2\x00\x00\x00\x04abcdVQFR\x00\x00\x00\x00");
+        chunks.next();
+        assert_eq!(
+            format!("{chunks:?}"),
+            "Chunks { offset: 12, len: 8, nested: false }"
         );
     }
 }

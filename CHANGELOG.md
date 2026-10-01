@@ -150,6 +150,9 @@ the fixes below, decoding output is unchanged.
   transparent ones). RGB conversion ignores it.
 - `bench time` panicked on movies with compressed codebook parts, Red
   Alert's among them.
+- Debug output (`{:?}`) of a `VQA` listed every byte of the movie after
+  its header. It now gives their number, as the new `Chunks` and
+  `AudioChunks` do.
 
 ### Migrating from 0.6
 
