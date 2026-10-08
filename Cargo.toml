@@ -25,4 +25,4 @@ fearless_simd = "1.0"
 # and the player builds as a stub
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 cpal = "0.18"
-minifb = "0.28"
+minifb = "0.29"
